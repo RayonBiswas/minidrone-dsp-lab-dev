@@ -2,7 +2,9 @@
 // Flash 3 boards (or 4), changing ANCHOR_ID to 1, 2, 3 (, 4). Power each from any USB charger or power bank.
 #include <WiFi.h>
 
-#define ANCHOR_ID 1          // 1, 2, 3 or 4
+#ifndef ANCHOR_ID
+#define ANCHOR_ID 1          // 1, 2, 3 or 4 (or pass -DANCHOR_ID=2 from arduino-cli)
+#endif
 #define WIFI_CHANNEL 1       // all anchors on the same channel so the drone scans fast
 
 void setup() {
