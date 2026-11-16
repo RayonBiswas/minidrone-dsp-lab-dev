@@ -102,3 +102,10 @@
 - Complementary vs Kalman: Kalman is more accurate; complementary is nearly as good for far less compute.
 - Yaw: the accelerometer cannot sense it because gravity doesn't change when you turn flat, so heading must come from the gyro (drifts) or the camera line angle θ.
 - Why the raw drone survives: Hough voting is robust; the DSP adds precision and smooth commands, which stop motor oscillation on a real drone.
+
+## Phone → Laptop link
+- Header button 📡 opens `#linkCard`. Laptop gets a 6-digit code (PeerJS id `mdsp-lab-<code>`); phone connects with it (`?link=<code>` pre-fills it).
+- Phone sends its back camera as a WebRTC call and each devicemotion / deviceorientationabsolute event over a JSON data channel (`['m', ax, ay, az, alpha, beta, gamma, dt]`, `['o', alpha]`), with its own dt.
+- Laptop re-dispatches them as window events (`e.linkDt` carries the phone's dt; `onMotion` and the Navigate listener use it), and `getCam()` returns the phone's stream, so the tabs run unchanged. `linkOwns()` stops a linked stream from being stopped when switching sources.
+- PeerJS 1.5.5 is loaded from unpkg only when the link is used. `?peerhost=&peerport=&peerpath=&peersecure=1` points it at your own PeerJS server.
+- Tested with two headless Chromium pages, a local PeerJS server and a fake camera/motion source (camera 640x480 on the laptop, IMU live with the phone's 20 deg tilt, Drone LIVE camera + LIVE IMU, stop/reconnect).
