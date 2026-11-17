@@ -116,3 +116,8 @@
 - `directions()` gives short classes with hysteresis: Go straight (<15/30°), Slight left/right, Turn left/right (>50/60°), Turn around (>125/135°); degrees go in the sub-line, not the speech.
 - `holdDirs()` keeps the display live and marks `d.stable` once the class has held 250 ms (600 ms with ESP32). `speak()` only speaks stable instructions, cancels a stale sentence the moment the class changes, repeats turns every 4 s and straight every 8 s, says Arrived once, and prefixes the first one with "Go.".
 - Start: green "face this way" arrow at START (heading 0 = up the map). Tap Set start, hold still ~1 s (gyro bias) until "Go".
+
+## Navigate: Follow track (camera)
+- Source `line`: `lineStep()` runs `pipeline()` on each camera frame (Camera tab colour `vCol`, `vThr`, ROI chip; median + thin close + biggest blob always on). Steering angle `sa = th + atan(d / 60 px)` (+ = right), low-passed 0.6/0.4, classes with hysteresis: straight < 14/8°, slight, turn > 40/32°.
+- No track for 600 ms -> "Track lost"; blue pad in 6 of 8 frames -> "Landing pad: stop" (arrived). `lineView()` draws the frame + detected line in place of the map; the laptop mirror draws the phone's estimate over its copy of the phone's video.
+- Tested with a canvas-stream fake camera: straight, slight/turn right and left, offset, lost, pad all give the right instruction; voice matches the screen.
