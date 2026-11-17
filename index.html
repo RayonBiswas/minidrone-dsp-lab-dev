@@ -66,7 +66,15 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 <header>
   <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope</small></h1>
   <span class="badge" id="badge">idle</span>
+  <button class="btn" id="linkBtn" style="padding:5px 10px;font-size:12px">📡 Phone → Laptop</button>
 </header>
+<div class="card" id="linkCard" style="display:none;max-width:876px;margin:0 auto 10px">
+  <h3>Phone → Laptop link</h3>
+  <p class="hint" style="margin-top:0">Open this page on both. <b>Laptop:</b> tap "Laptop: show code". <b>Phone:</b> type the code, tap "Phone: send". The laptop then runs every tab on the phone's camera and motion sensors. Both need internet (to find each other); the video then goes directly over your Wi-Fi.</p>
+  <div class="row"><button class="btn pri" id="linkRecv">Laptop: show code</button><input id="linkCode" inputmode="numeric" maxlength="6" placeholder="6-digit code" style="width:120px;padding:9px;border-radius:10px;border:1px solid var(--line);background:#0b101a;color:var(--txt);font-size:15px"><button class="btn pri" id="linkSend">Phone: send</button><button class="btn" id="linkStopBtn">Stop</button></div>
+  <div id="linkShow" style="font:700 40px/1.2 ui-monospace,monospace;letter-spacing:.15em;margin:8px 0 0"></div>
+  <p class="hint" id="linkMsg"></p>
+</div>
 <nav>
   <button data-tab="vision" class="on">Camera</button>
   <button data-tab="imu">IMU</button>
@@ -342,6 +350,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
       <button class="btn" id="nObsMode">Edit obstacles</button>
       <button class="btn" id="nObsClear">Clear obstacles</button>
       <button class="btn" id="nA4">4th anchor (far corner)</button>
+      <button class="btn" id="nRouteCsv">Route → CSV (for the drone)</button>
     </div>
     <div class="row">
       <button class="btn pri" id="nStart">Set start</button>
@@ -483,7 +492,7 @@ function chips(pipeId) {
   });
   return st;
 }
-function setBadge(txt, cls) { const b = $('badge'); b.textContent = txt; b.className = 'badge ' + (cls || ''); }
+function setBadge(txt, cls) { const b = $('badge'); b.textContent = txt + (LINK.stream || LINK.gotData ? ' · from phone' : ''); b.className = 'badge ' + (cls || ''); }
 function sizeCanvas(c) {
   const r = c.getBoundingClientRect(), d = Math.min(window.devicePixelRatio || 1, 2);
   if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); }
@@ -750,10 +759,10 @@ document.querySelectorAll('[data-src]').forEach(b => b.onclick = async () => {
   if (s === 'photo') { $('photoIn').click(); return; }
   if (s === 'cam') {
     try {
-      camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      camStream = await getCam();
       vid.srcObject = camStream; await vid.play();
     } catch (e) { $('vMsg').textContent = 'Camera blocked here (' + e.name + '). Open the hosted https:// link in Chrome/Safari on your phone, or use Photo.'; return; }
-  } else if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  } else if (camStream) { if (!linkOwns(camStream)) camStream.getTracks().forEach(t => t.stop()); camStream = null; }
   selectSrc(s);
 });
 $('photoIn').onchange = e => {
@@ -1069,13 +1078,14 @@ function onMotion(e) {
     $('simCtl').style.display = 'none'; $('lgTrue').style.display = 'none'; $('iMsg').textContent = 'LIVE: real accelerometer + gyroscope.'; $('imuStart').textContent = 'Sensors on';
     return;
   }
-  let dt = (now - imu.lastT) / 1000; imu.lastT = now;
+  let dt = e.linkDt != null ? e.linkDt : (now - imu.lastT) / 1000; imu.lastT = now;
   if (!(dt > 0.001 && dt < 0.2)) return;
   processSample(a.x, a.y, a.z, r.gamma, dt, NaN, r.beta || 0);
 }
 imu.evCount = 0; imu.evNull = 0;
 async function startMotion() {
   if (imu.live) return;
+  if (LINK.gotData) { window.removeEventListener('devicemotion', onMotion); window.addEventListener('devicemotion', onMotion); return; }
   const diag = () => 'Diagnostics: secure page ' + (window.isSecureContext ? 'yes' : 'NO') + ', DeviceMotionEvent ' + (typeof DeviceMotionEvent !== 'undefined' ? 'yes' : 'NO') + ', events received ' + imu.evCount + ' (empty ' + imu.evNull + ').';
   $('imuStart').textContent = 'Waiting for sensor…';
   $('iMsg').textContent = 'Asking the phone for motion data…';
@@ -1318,7 +1328,7 @@ $('dStart').onclick = async () => {
   startMotion();
   try {
     if (!camStream) {
-      camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      camStream = await getCam();
       vid.srcObject = camStream; await vid.play();
     }
     drone.src = 'cam';
@@ -1885,7 +1895,7 @@ function navReset(keepCal) {
 }
 // heading: integrate gyro (both tracks), filtered track removes bias and fuses compass
 function headingStep(rateDeg, dt, compassDeg) {
-  if (!NV.started) return;
+  if (!NV.started || NV.mirror) return;
   if (!NV.biasDone) { NV.biasSamples.push(rateDeg); if (NV.biasSamples.length * dt >= 1.0) { NV.bias = NV.biasSamples.reduce((a, b) => a + b, 0) / NV.biasSamples.length; NV.biasDone = true; } return; }
   NV.raw.psi = wrapA(NV.raw.psi + rateDeg * D2R * dt);
   let p = NV.flt.psi + (rateDeg - (nChip.bias ? NV.bias : 0)) * D2R * dt;
@@ -1956,7 +1966,7 @@ function camGray() {
   return g;
 }
 NV.live = { rate: 0, compass: null, lastT: 0 };
-window.addEventListener('devicemotion', e => { const r = e.rotationRate; if (!r || r.alpha == null) return; const now = performance.now(), dt = NV.live.lastT ? (now - NV.live.lastT) / 1000 : 0; NV.live.lastT = now; if ((NV.src === 'cam' || NV.src === 'esp') && dt > 0 && dt < 0.2) headingStep(r.alpha, dt, NV.live.compass); });
+window.addEventListener('devicemotion', e => { const r = e.rotationRate; if (!r || r.alpha == null) return; const now = performance.now(), dt = e.linkDt != null ? e.linkDt : NV.live.lastT ? (now - NV.live.lastT) / 1000 : 0; NV.live.lastT = now; if ((NV.src === 'cam' || NV.src === 'esp') && dt > 0 && dt < 0.2) headingStep(r.alpha, dt, NV.live.compass); });
 window.addEventListener('deviceorientationabsolute', e => { if (e.alpha != null) NV.live.compass = e.alpha; });
 function liveStep() {
   if (!vid.videoWidth) return null;
@@ -1975,7 +1985,7 @@ document.querySelectorAll('[data-nsrc]').forEach(b => b.onclick = async () => {
   if (s === 'cam') {
     try {
       startMotion();
-      if (!camStream) { camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false }); vid.srcObject = camStream; await vid.play(); }
+      if (!camStream) { camStream = await getCam(); vid.srcObject = camStream; await vid.play(); }
     } catch (e) { $('nMsg').textContent = 'Camera blocked here (' + e.name + '). Open the GitHub Pages link in Chrome on your phone.'; return; }
   }
   NV.src = s; document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === s));
@@ -2157,11 +2167,181 @@ function holdDirs(d) {
   if (d.arrived || !H.shown || H.n >= need) H.shown = d;
   return H.shown.key === d.key ? d : { ...d, text: H.shown.text, key: H.shown.key };
 }
+
+// ---------- phone -> laptop link (WebRTC via PeerJS) ----------
+// The phone sends its back camera as a WebRTC video track and every devicemotion /
+// deviceorientationabsolute event over a data channel. The laptop replays those as
+// window events, so the IMU, Drone and Navigate code runs unchanged; getCam() returns
+// the phone's video. PeerJS's public server only introduces the two devices.
+const LINK = { peer: null, role: null, stream: null, sendStream: null, ownSend: false, conn: null, call: null, lastT: 0, wake: null, motionOn: false, gotData: false };
+const LINK_ID = 'mdsp-lab-', LINK_LIB = 'https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js';
+function linkOwns(st) { return !!st && (st === LINK.stream || st === LINK.sendStream); }
+async function getCam() {
+  if (LINK.stream && LINK.stream.active) return LINK.stream;
+  return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+}
+function linkMsg(t) { $('linkMsg').textContent = t; }
+function linkOpts() {                               // ?peerhost=... uses your own PeerJS server instead of the public one
+  const q = new URLSearchParams(location.search), h = q.get('peerhost');
+  return h ? { host: h, port: +(q.get('peerport') || 9000), path: q.get('peerpath') || '/', secure: q.get('peersecure') === '1' } : {};
+}
+function loadPeerJS() {
+  if (window.Peer) return Promise.resolve();
+  return new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = LINK_LIB; sc.onload = ok; sc.onerror = () => bad(new Error('could not load PeerJS: is this device online?')); document.head.appendChild(sc); });
+}
+function linkStop(quiet) {
+  window.removeEventListener('devicemotion', linkFwdMotion); window.removeEventListener('deviceorientationabsolute', linkFwdOrient);
+  if (LINK.navTimer) { clearInterval(LINK.navTimer); LINK.navTimer = null; } linkEndMirror();
+  for (const k of ['call', 'conn']) { try { if (LINK[k]) LINK[k].close(); } catch (e) {} LINK[k] = null; }
+  try { if (LINK.peer) LINK.peer.destroy(); } catch (e) {} LINK.peer = null;
+  if (LINK.stream) {                                // laptop: fall back to the synthetic sources
+    if (camStream === LINK.stream) { camStream = null; vid.srcObject = null; }
+    if (vSrc === 'cam') selectSrc('synth'); if (drone.src === 'cam') drone.src = 'synth';
+    LINK.stream = null;
+  }
+  if (LINK.sendStream) { if (LINK.ownSend) LINK.sendStream.getTracks().forEach(t => t.stop()); LINK.sendStream = null; }
+  try { if (LINK.wake) LINK.wake.release(); } catch (e) {} LINK.wake = null;
+  LINK.role = null; LINK.lastT = 0; LINK.gotData = false; LINK.motionOn = false;
+  $('linkShow').textContent = ''; $('linkBtn').classList.remove('on');
+  if (!quiet) linkMsg('Link stopped.');
+}
+async function linkReceive() {                      // laptop side
+  linkStop(true);
+  try { await loadPeerJS(); } catch (e) { linkMsg(e.message); return; }
+  const code = String(100000 + Math.floor(Math.random() * 900000));
+  LINK.role = 'laptop'; linkMsg('Getting a code…');
+  const peer = LINK.peer = new Peer(LINK_ID + code, linkOpts());
+  peer.on('open', () => {
+    $('linkShow').textContent = code;
+    linkMsg('On the phone: open ' + location.origin + location.pathname + '?link=' + code + ' (or tap 📡 and type ' + code + '), then tap "Phone: send". Keep this tab open.');
+  });
+  peer.on('error', e => { if (e.type === 'unavailable-id') { linkReceive(); return; } linkMsg('Link error: ' + e.type + '. Check both devices are online, then try again.'); });
+  peer.on('disconnected', () => { if (LINK.peer === peer && !peer.destroyed) peer.reconnect(); });
+  peer.on('connection', c => {
+    if (LINK.conn && LINK.conn.open) { c.on('open', () => c.close()); return; }   // one phone at a time
+    LINK.conn = c;
+    c.on('open', () => linkMsg('Phone connected, waiting for its camera…'));
+    c.on('data', linkData);
+    c.on('close', () => { if (LINK.conn === c) { linkMsg('Phone disconnected. The code still works: tap "Phone: send" again.'); LINK.conn = null; if (LINK.stream) { if (camStream === LINK.stream) camStream = null; if (vSrc === 'cam') selectSrc('synth'); if (drone.src === 'cam') drone.src = 'synth'; LINK.stream = null; } LINK.gotData = false; linkEndMirror(); } });
+  });
+  peer.on('call', call => { if (LINK.call) try { LINK.call.close(); } catch (e) {} LINK.call = call; call.answer(); call.on('stream', linkGotStream); });
+}
+async function linkGotStream(st) {
+  if (LINK.stream === st) return;
+  LINK.stream = st; camStream = st; vid.muted = true; vid.srcObject = st;
+  try { await vid.play(); } catch (e) {}
+  selectSrc('cam'); if (drone.on || tab === 'drone') drone.src = 'cam';
+  $('linkBtn').classList.add('on');
+  if (!NV.mirror) linkMsg('LIVE: the phone\'s camera and motion sensors now drive this laptop. Camera, IMU, Drone and Navigate all use them (tap Start / Phone camera there as usual).');
+}
+function linkData(d) {                              // laptop: replay the phone's sensor events
+  if (!Array.isArray(d)) { if (d && d.k === 'nav') linkNav(d); return; }
+  LINK.gotData = true;
+  if (d[0] === 'm') {
+    if (!LINK.motionOn) { LINK.motionOn = true; if (!imu.live) { window.removeEventListener('devicemotion', onMotion); window.addEventListener('devicemotion', onMotion); } }   // relayed data needs no sensor permission on the laptop
+    const ev = new Event('devicemotion');
+    ev.accelerationIncludingGravity = { x: d[1], y: d[2], z: d[3] }; ev.rotationRate = { alpha: d[4], beta: d[5], gamma: d[6] }; ev.linkDt = d[7];
+    window.dispatchEvent(ev);
+  } else if (d[0] === 'o') { const ev = new Event('deviceorientationabsolute'); ev.alpha = d[1]; window.dispatchEvent(ev); }
+}
+const q3 = v => v == null ? null : Math.round(v * 1000) / 1000;
+function linkFwdMotion(e) {                          // phone: forward each motion event with its own dt
+  const a = e.accelerationIncludingGravity, r = e.rotationRate;
+  if (!a || a.x == null || !r || r.gamma == null || e.linkDt != null) return;
+  const now = performance.now(), dt = LINK.lastT ? (now - LINK.lastT) / 1000 : 0; LINK.lastT = now;
+  if (LINK.conn && LINK.conn.open) LINK.conn.send(['m', q3(a.x), q3(a.y), q3(a.z), q3(r.alpha), q3(r.beta), q3(r.gamma), Math.round(dt * 1e5) / 1e5]);
+}
+function linkFwdOrient(e) { if (e.alpha != null && LINK.conn && LINK.conn.open) LINK.conn.send(['o', q3(e.alpha)]); }
+async function linkSend() {                         // phone side
+  const code = $('linkCode').value.replace(/\D/g, '');
+  if (code.length !== 6) { linkMsg('Type the 6-digit code shown on the laptop.'); return; }
+  linkStop(true);
+  try { if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') await DeviceMotionEvent.requestPermission(); } catch (e) {}
+  try {
+    if (camStream && camStream.active) { LINK.sendStream = camStream; LINK.ownSend = false; }
+    else { LINK.sendStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false }); LINK.ownSend = true; }
+  } catch (e) { linkMsg('Camera blocked (' + e.name + '): sending motion sensors only.'); }
+  try { await loadPeerJS(); } catch (e) { linkMsg(e.message); return; }
+  LINK.role = 'phone'; linkMsg('Connecting to the laptop…');
+  const peer = LINK.peer = new Peer(linkOpts()), id = LINK_ID + code;
+  peer.on('error', e => linkMsg(e.type === 'peer-unavailable' ? 'No laptop with code ' + code + '. Check the code and that the laptop still shows it.' : 'Link error: ' + e.type + '.'));
+  peer.on('open', () => {
+    const c = LINK.conn = peer.connect(id, { serialization: 'json', reliable: true });
+    c.on('open', async () => {
+      if (LINK.sendStream) LINK.call = peer.call(id, LINK.sendStream);
+      window.addEventListener('devicemotion', linkFwdMotion); window.addEventListener('deviceorientationabsolute', linkFwdOrient);
+      $('linkBtn').classList.add('on');
+      linkMsg('Sending ' + (LINK.sendStream ? 'camera + ' : '') + 'motion sensors to the laptop. Keep this page open and the screen on; hold the phone as each tab says.');
+      try { if (navigator.wakeLock) LINK.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+      LINK.navN = 0; LINK.navTimer = setInterval(linkSendNav, 100);
+    });
+    c.on('close', () => { if (LINK.conn === c) { linkStop(true); linkMsg('Laptop disconnected.'); } });
+  });
+}
+$('linkBtn').onclick = () => { const c = $('linkCard'); c.style.display = c.style.display === 'none' ? '' : 'none'; };
+$('linkRecv').onclick = linkReceive; $('linkSend').onclick = linkSend; $('linkStopBtn').onclick = () => linkStop();
+{ const lc = new URLSearchParams(location.search).get('link'); if (lc) { $('linkCode').value = lc; $('linkCard').style.display = ''; linkMsg('Tap "Phone: send" to stream this phone to the laptop.'); } }
+
+// Navigate mirroring: the phone (with the ESP32 over Bluetooth) is the navigator; it sends its
+// map, route, position, path and directions 10x per second and the laptop draws the same map.
+const r1 = v => Math.round(v * 10) / 10, rp = a => a.map(p => [r1(p[0]), r1(p[1])]);
+function thin(path, n) { if (path.length <= n) return path; const st = path.length / n, o = []; for (let i = 0; i < n; i++) o.push(path[Math.floor(i * st)]); o.push(path[path.length - 1]); return o; }
+function linkSendNav() {                            // phone
+  if (!LINK.conn || !LINK.conn.open || !NV.flt) return;
+  const full = LINK.navN++ % 10 === 0, m = { k: 'nav', started: !!NV.started, pos: rp([NV.flt.pos])[0], psi: r1(NV.flt.psi * 1000) / 1000, dirs: NV.lastDirs || null,
+    route: NV.route ? rp([NV.flt.pos, ...NV.route.slice(1)]) : null, rawPos: NV.raw ? rp([NV.raw.pos])[0] : null };
+  if (NV.truth && (NV.src === 'sim' || NV.src === 'espsim')) { m.tPos = rp([NV.truth.pos])[0]; m.tPsi = r1(NV.truth.psi * 1000) / 1000; }
+  if (full) {
+    m.map = { w: AR.w, h: AR.h, grid: AR.grid, inflate: AR.inflate, room: BC.room, start: AR.start, goal: AR.goal, obs: AR.obsList, src: NV.src, anchors: BC.anchors };
+    m.path = rp(thin(NV.flt.path, 400)); if (NV.raw) m.raw = rp(NV.raw.path.slice(-90)); if (m.tPos) m.tPath = rp(thin(NV.truth.path, 400));
+  }
+  LINK.conn.send(m);
+}
+function linkNav(m) {                               // laptop
+  LINK.gotData = true;
+  if (!NV.mirror) {
+    NV.mirror = true; navReset(true); NV.flt.path = []; NV.raw.path = []; NV.truth.path = [];
+    showTab('nav'); $('nMsg').textContent = 'Mirroring the phone: route, position and directions come from the phone. "Route → CSV" saves the route for the drone.';
+    linkMsg('LIVE: mirroring the phone\'s Navigate tab (route, position, directions).');
+    $('linkCard').style.display = 'none'; setTimeout(() => $('nArrow').scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  }
+  if (m.map) { AR.w = m.map.w; AR.h = m.map.h; AR.grid = m.map.grid; AR.inflate = m.map.inflate; if (m.map.room) { BC.room = m.map.room; $('nW').value = m.map.room[0]; $('nH').value = m.map.room[1]; } AR.start = m.map.start; AR.goal = m.map.goal; AR.obsList = m.map.obs; NV.src = m.map.src; if (m.map.anchors) BC.anchors = m.map.anchors; document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === NV.src)); }
+  if (m.path) NV.flt.path = m.path; if (m.raw) NV.raw.path = m.raw; if (m.tPath) NV.truth.path = m.tPath;
+  NV.started = m.started; NV.flt.pos = m.pos; NV.flt.psi = m.psi; NV.route = m.route ? [m.pos, ...m.route.slice(1)] : null; NV.lastDirs = m.dirs;
+  if (m.rawPos) NV.raw.pos = m.rawPos; if (m.tPos) { NV.truth.pos = m.tPos; NV.truth.psi = m.tPsi; }
+  const lp = NV.flt.path[NV.flt.path.length - 1]; if (!lp || Math.hypot(lp[0] - m.pos[0], lp[1] - m.pos[1]) > 1) NV.flt.path.push(m.pos);
+}
+function linkEndMirror() { if (NV.mirror) { NV.mirror = false; NV.started = false; NV.lastDirs = null; $('nMsg').textContent = 'Phone disconnected: stopped mirroring.'; } }
+// Route export: the planned A* route from START to GOAL, cut down to its corner points.
+// Columns: map cm (x right, y up the map) and drone metres relative to START, with the drone
+// starting on START facing up the map (x forward, y right, as in the Simulink minidrone's NED frame).
+function clearLine(a, b) {                           // straight segment stays clear of obstacles (with the safety margin)
+  const n = Math.max(2, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2));
+  for (let i = 0; i <= n; i++) { const t = i / n; if (blocked(a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))) return false; }
+  return true;
+}
+function routeCorners(R) {                           // keep only the corners needed to get around obstacles
+  const o = [R[0]]; let i = 0;
+  while (i < R.length - 1) { let j = R.length - 1; while (j > i + 1 && !clearLine(R[i], R[j])) j--; o.push(R[j]); i = j; }
+  return o;
+}
+$('nRouteCsv').onclick = () => {
+  const R = astar(AR.start, AR.goal);
+  if (!R || R.length < 2) { $('nMsg').textContent = 'No route from START to GOAL (blocked by obstacles?).'; return; }
+  const W = routeCorners(R), s0 = AR.start;
+  let csv = '# Mini-drone route from the DSP lab Navigate tab, ' + new Date().toISOString() + '\n# room ' + (AR.w / 100) + ' x ' + (AR.h / 100) + ' m, start ' + s0.join(',') + ' cm, goal ' + AR.goal.join(',') + ' cm\n# drone frame: starts on START facing up the map; x_fwd forward, y_right right (metres)\n';
+  csv += 'i,x_cm,y_cm,x_fwd_m,y_right_m\n';
+  W.forEach((p, i) => { csv += [i, p[0].toFixed(1), p[1].toFixed(1), ((p[1] - s0[1]) / 100).toFixed(3), ((p[0] - s0[0]) / 100).toFixed(3)].join(',') + '\n'; });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'drone_route.csv'; a.click();
+  let len = 0; for (let i = 1; i < W.length; i++) len += Math.hypot(W[i][0] - W[i - 1][0], W[i][1] - W[i - 1][1]);
+  $('nMsg').textContent = 'Saved drone_route.csv: ' + W.length + ' waypoints, ' + (len / 100).toFixed(2) + ' m. Load it in MATLAB with matlab/route_to_waypoints.m.';
+};
 // ---------- main loop ----------
 function updBadge() {
   if (tab === 'vision') vSrc === 'cam' ? setBadge('LIVE camera', 'live') : vSrc === 'photo' ? setBadge('Your photo', 'live') : setBadge('Synthetic track', 'sim');
   else if (tab === 'drone') setBadge((drone.src === 'cam' ? 'LIVE camera' : 'synthetic track') + ' · ' + (imu.live ? 'LIVE IMU' : 'sim IMU'), drone.src === 'cam' && imu.live ? 'live' : 'sim');
   else if (tab === 'results') setBadge('Experiments', '');
+  else if (tab === 'nav' && NV.mirror) setBadge('Mirroring phone · ' + (NV.src === 'esp' ? 'ESP32' : NV.src === 'espsim' ? 'simulated ESP32' : NV.src === 'cam' ? 'camera' : 'simulation'), 'live');
   else if (tab === 'nav') NV.src === 'sim' ? setBadge('Simulated floor', 'sim') : setBadge('LIVE camera + gyro', 'live');
   else if (tab === 'beacon') BC.src === 'sim' ? setBadge('Simulated ESP32s', 'sim') : setBadge(BC.src === 'csv' ? 'Replaying ESP32 log' : 'LIVE ESP32', 'live');
   else if (tab === 'imu') imu.live ? setBadge('LIVE phone sensors', 'live') : setBadge('SIMULATED sensors', 'sim');
@@ -2175,7 +2355,7 @@ function loop(now) {
   while (altAcc > 1 / AFS) { altTick(); altAcc -= 1 / AFS; }
   if (tab === 'alt') altDraw();
   if (tab === 'imu') imuDraw();
-  if (tab === 'nav') { let fresh = false; if (NV.started && now - lastN > 66 && !NV.trialBusy) { lastN = now; const dd = NV.src === 'sim' ? simStep(1 / 15) : NV.src === 'espsim' ? espSimStep(1 / 15) : NV.src === 'esp' ? (NV.biasDone && NV.gotEsp ? directions() : null) : liveStep(); NV.lastDirs = NV.biasDone ? holdDirs(dd) : null; fresh = true; } navDraw(NV.started ? NV.lastDirs : null, fresh); }
+  if (tab === 'nav') { let fresh = false; if (NV.started && !NV.mirror && now - lastN > 66 && !NV.trialBusy) { lastN = now; const dd = NV.src === 'sim' ? simStep(1 / 15) : NV.src === 'espsim' ? espSimStep(1 / 15) : NV.src === 'esp' ? (NV.biasDone && NV.gotEsp ? directions() : null) : liveStep(); NV.lastDirs = NV.biasDone ? holdDirs(dd) : null; fresh = true; } navDraw(NV.started ? NV.lastDirs : null, fresh); }
   if (tab === 'beacon') { if (BC.src === 'sim' && now - lastB > 50) { lastB = now; bSimStep(); } bDraw(); }
   if (tab === 'drone' && now - lastD > 66) { lastD = now; droneStep(); }
   if (tab === 'flight' && now - lastF > 50) { lastF = now; flyStep(); if (fly.fast) flyStep(); flyDraw(); }
