@@ -64,7 +64,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 </head>
 <body>
 <header>
-  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope</small></h1>
+  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-17b</small></h1>
   <span class="badge" id="badge">idle</span>
   <button class="btn" id="linkBtn" style="padding:5px 10px;font-size:12px">📡 Phone → Laptop</button>
 </header>
@@ -336,11 +336,11 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
       <span class="chip">Map + A* route</span>
     </div>
     <div class="row" style="margin-top:10px">
-      <button class="btn on" data-nsrc="sim">Simulate</button>
-      <button class="btn" data-nsrc="cam">Live phone (camera)</button>
-      <button class="btn" data-nsrc="espsim">Simulate ESP32</button>
-      <button class="btn" data-nsrc="esp">ESP32 via Bluetooth</button>
-      <button class="btn" data-nsrc="line">Follow track (camera)</button>
+      <button class="btn on" data-nsrc="line">📷 Follow track (camera)</button>
+      <button class="btn" data-nsrc="sim">Map: simulate</button>
+      <button class="btn" data-nsrc="cam">Map: camera odometry</button>
+      <button class="btn" data-nsrc="espsim">Map: simulate ESP32</button>
+      <button class="btn" data-nsrc="esp">Map: ESP32 via Bluetooth</button>
     </div>
     <div class="row">
       <button class="btn" id="nRoomTable">Table 1.5 × 1 m</button>
@@ -1881,7 +1881,7 @@ function renderFloor(pos, psi, noise) {
   }
   return g;
 }
-const NV = { src: 'sim', k: 1 / PPCM, u: [0, 1], flip: 1, voice: true, lastSpoken: '', lastSpeakT: 0 };
+const NV = { src: 'line', k: 1 / PPCM, u: [0, 1], flip: 1, voice: true, lastSpoken: '', lastSpeakT: 0 };
 try { const c = JSON.parse(localStorage.getItem('navCal') || 'null'); if (c && c.k > 0) { NV.k = c.k; NV.u = c.u; NV.flip = c.flip || 1; NV.camCal = true; } } catch (e) {}
 function newTrack(pos) { return { pos: [...pos], psi: 0, path: [[...pos]], prevSpec: null, hist: [], vel: [0, 0] }; }
 function navReset(keepCal) {
@@ -2001,7 +2001,7 @@ document.querySelectorAll('[data-nsrc]').forEach(b => b.onclick = async () => {
       if (!camStream) { camStream = await getCam(); vid.srcObject = camStream; await vid.play(); }
     } catch (e) { $('nMsg').textContent = 'Camera blocked here (' + e.name + '). Open the GitHub Pages link in Chrome on your phone.'; return; }
   }
-  if (s === 'line') { $('nHint').textContent = 'Follow track: the directions come from the track the camera sees (same detection as the Camera tab; pick the track colour there, or tap the track in its panel 1). Hold the phone flat, screen up, camera down, about 30 cm above the track, top edge pointing along the track. Tap Set start; it says "Go" and then steers you along the track, says "Track lost" if it loses it and "Landing pad: stop" at the blue pad.'; }
+  if (s === 'line') { $('nHint').textContent = LINE_HINT; }
   NV.src = s; navModeUI(); document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === s));
   $('nMsg').textContent = '';
   if (s === 'espsim' || s === 'esp') { $('nHint').textContent = s === 'espsim' ? 'Simulated ESP32 anchors in the room corners (A4 optional). A virtual person carries the phone and follows the directions. Position comes from noisy RSSI: red = raw trilateration, blue = median + Kalman chain, white = truth.' : 'Live: put ESP32 anchors A1, A2, A3 in the room corners shown on the map, carry the phone + drone ESP32. At START: phone flat, screen up, top edge pointing up the map (green arrow at START). Tap Set start, hold still until you hear "Go", then follow the arrow.'; NV.started = false; $('nInstr').textContent = 'Tap Set start'; $('nSub').textContent = 'room ' + (AR.w / 100) + ' × ' + (AR.h / 100) + ' m'; return; }
@@ -2009,7 +2009,11 @@ document.querySelectorAll('[data-nsrc]').forEach(b => b.onclick = async () => {
     : 'Live: hold the phone flat, screen up, about 30 cm above a textured surface (newspaper, tiles, wood). Top edge = forward. ' + (NV.camCal ? 'Calibration loaded.' : 'Do "Calibrate 50 cm" once first.') + ' Then put the phone on START, top edge pointing up the map (green arrow), tap Set start and hold still until you hear "Go".';
   NV.started = false; $('nInstr').textContent = 'Tap Set start'; $('nSub').textContent = s === 'sim' ? 'the virtual phone will fly to the goal' : 'hold still for 1 s after tapping';
 });
-$('nStart').onclick = () => {
+$('nStart').onclick = async () => {
+  if (NV.src === 'line' && !(camStream && camStream.active)) {
+    try { camStream = await getCam(); vid.srcObject = camStream; await vid.play(); }
+    catch (e) { $('nMsg').textContent = 'Camera blocked here (' + e.name + '). Open the GitHub Pages link in Chrome on your phone and allow the camera.'; return; }
+  }
   if (NV.src === 'cam' && !NV.camCal) { $('nMsg').textContent = 'Tip: calibrate first so distances are in real cm. Using a rough default for now.'; NV.k = 0.08; }
   try { speechSynthesis.cancel(); if (NV.voice) speechSynthesis.speak(new SpeechSynthesisUtterance('Hold still')); } catch (e) {}
   navReset(); NV.lastSpeakT = performance.now(); $('nInstr').textContent = 'Hold still…'; $('nSub').textContent = 'phone flat, top edge pointing ' + (NV.src === 'line' ? 'along the track' : 'up the map') + ' · wait for "Go"';
@@ -2365,11 +2369,13 @@ $('nRouteCsv').onclick = () => {
 // Same detection as the Camera tab (colour, threshold and chips from there). The track's angle th
 // (0 = straight ahead, + = heading right) and offset d (px, + = right of centre) give a steering
 // angle sa = th + atan(d / 60 px look-ahead), low-passed; sa picks the spoken instruction.
+const LINE_HINT = 'Follow track: the directions come from the track the camera sees, live (same detection as the Camera tab; pick the track colour there, or tap the track in its panel 1). Hold the phone flat, screen up, camera down, about 30 cm above the track, top edge pointing along the track. Tap Set start (it turns the camera on); it says "Go", then steers you along the track, says "Track lost" if it loses it and "Landing pad: stop" at the blue pad. The Map buttons are the older map + A* route modes.';
 function navModeUI() {                               // map legend and optical-flow panels do not apply to Follow track
   const ln = NV.src === 'line', lg = $('nMap').nextElementSibling, fl = $('nCam').closest('.card');
   if (lg) lg.style.display = ln ? 'none' : ''; if (fl) fl.style.display = ln ? 'none' : '';
 }
-const lineCv = document.createElement('canvas'); lineCv.width = W * 2; lineCv.height = H * 2;
+const lineCv = document.createElement('canvas');
+navModeUI(); $('nHint').textContent = LINE_HINT; $('nSub').textContent = 'hold the phone over the track, then tap Set start'; lineCv.width = W * 2; lineCv.height = H * 2;
 function lineStep() {
   const L = NV.line; if (!L || !vid.videoWidth) return null;
   const img = grabImage(vid, vid.videoWidth, vid.videoHeight), now = performance.now();
