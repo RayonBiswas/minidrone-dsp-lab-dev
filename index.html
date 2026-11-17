@@ -340,6 +340,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
       <button class="btn" data-nsrc="cam">Live phone (camera)</button>
       <button class="btn" data-nsrc="espsim">Simulate ESP32</button>
       <button class="btn" data-nsrc="esp">ESP32 via Bluetooth</button>
+      <button class="btn" data-nsrc="line">Follow track (camera)</button>
     </div>
     <div class="row">
       <button class="btn" id="nRoomTable">Table 1.5 × 1 m</button>
@@ -1890,6 +1891,7 @@ function navReset(keepCal) {
   NV.truth = { pos: [...AR.start], psi: 0, path: [[...AR.start]] };
   NV.route = astar(AR.start, AR.goal); NV.dist = 0; NV.arrived = false; NV.t = 0; NV.calMode = false; NV.calSum = [0, 0];
   NV.biasSamples = []; NV.bias = 0; NV.biasDone = !nChip.bias; NV.psiComp0 = null; NV.lastRoute = 0; NV.err = null;
+  if (NV.src === 'line') { NV.biasDone = true; NV.line = { sa: 0, lastSeen: performance.now(), est: null, img: null, pad: [] }; }
   NV.started = true; NV.q = 0; NV.ms = 0; NV.dirClass = 'straight'; NV.saidGo = false; NV.lastSpoken = ''; NV.hold = { key: null, since: 0 };
   if (NV.src === 'esp') { NV.raw.path = []; NV.flt.path = []; }
 }
@@ -1993,23 +1995,24 @@ document.querySelectorAll('[data-nsrc]').forEach(b => b.onclick = async () => {
   }
   if ((s === 'esp' || s === 'espsim') && AR.w < 300) setRoom(5, 4);
   if ((s === 'sim' || s === 'cam') && AR.w > 300) setRoom(1.5, 1);
-  if (s === 'cam') {
+  if (s === 'cam' || s === 'line') {
     try {
-      startMotion();
+      if (s === 'cam') startMotion();
       if (!camStream) { camStream = await getCam(); vid.srcObject = camStream; await vid.play(); }
     } catch (e) { $('nMsg').textContent = 'Camera blocked here (' + e.name + '). Open the GitHub Pages link in Chrome on your phone.'; return; }
   }
-  NV.src = s; document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === s));
+  if (s === 'line') { $('nHint').textContent = 'Follow track: the directions come from the track the camera sees (same detection as the Camera tab; pick the track colour there, or tap the track in its panel 1). Hold the phone flat, screen up, camera down, about 30 cm above the track, top edge pointing along the track. Tap Set start; it says "Go" and then steers you along the track, says "Track lost" if it loses it and "Landing pad: stop" at the blue pad.'; }
+  NV.src = s; navModeUI(); document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === s));
   $('nMsg').textContent = '';
   if (s === 'espsim' || s === 'esp') { $('nHint').textContent = s === 'espsim' ? 'Simulated ESP32 anchors in the room corners (A4 optional). A virtual person carries the phone and follows the directions. Position comes from noisy RSSI: red = raw trilateration, blue = median + Kalman chain, white = truth.' : 'Live: put ESP32 anchors A1, A2, A3 in the room corners shown on the map, carry the phone + drone ESP32. At START: phone flat, screen up, top edge pointing up the map (green arrow at START). Tap Set start, hold still until you hear "Go", then follow the arrow.'; NV.started = false; $('nInstr').textContent = 'Tap Set start'; $('nSub').textContent = 'room ' + (AR.w / 100) + ' × ' + (AR.h / 100) + ' m'; return; }
-  $('nHint').textContent = s === 'sim' ? 'Simulation: a virtual phone flies over a textured floor and follows the app\'s directions. White = true path, blue = filtered estimate, red = raw estimate.'
+  if (s !== 'line') $('nHint').textContent = s === 'sim' ? 'Simulation: a virtual phone flies over a textured floor and follows the app\'s directions. White = true path, blue = filtered estimate, red = raw estimate.'
     : 'Live: hold the phone flat, screen up, about 30 cm above a textured surface (newspaper, tiles, wood). Top edge = forward. ' + (NV.camCal ? 'Calibration loaded.' : 'Do "Calibrate 50 cm" once first.') + ' Then put the phone on START, top edge pointing up the map (green arrow), tap Set start and hold still until you hear "Go".';
   NV.started = false; $('nInstr').textContent = 'Tap Set start'; $('nSub').textContent = s === 'sim' ? 'the virtual phone will fly to the goal' : 'hold still for 1 s after tapping';
 });
 $('nStart').onclick = () => {
   if (NV.src === 'cam' && !NV.camCal) { $('nMsg').textContent = 'Tip: calibrate first so distances are in real cm. Using a rough default for now.'; NV.k = 0.08; }
   try { speechSynthesis.cancel(); if (NV.voice) speechSynthesis.speak(new SpeechSynthesisUtterance('Hold still')); } catch (e) {}
-  navReset(); NV.lastSpeakT = performance.now(); $('nInstr').textContent = 'Hold still…'; $('nSub').textContent = 'phone flat, top edge pointing up the map · wait for "Go"';
+  navReset(); NV.lastSpeakT = performance.now(); $('nInstr').textContent = 'Hold still…'; $('nSub').textContent = 'phone flat, top edge pointing ' + (NV.src === 'line' ? 'along the track' : 'up the map') + ' · wait for "Go"';
 };
 $('nCal').onclick = () => {
   if (!NV.started) navReset();
@@ -2044,6 +2047,7 @@ function nGeom(cv) { const d = Math.min(window.devicePixelRatio || 1, 2), w = cv
 function navDraw(dirs, fresh) {
   const cv = $('nMap'); sizeCanvas(cv); const c = cv.getContext('2d'), g = nGeom(cv), d = g.d, X = x => g.ox + x * g.s, Y = y => g.oy - y * g.s;
   c.clearRect(0, 0, cv.width, cv.height);
+  if (NV.src === 'line') lineView(c, cv); else {
   const gs = AR.w > 300 ? 50 : 10; c.strokeStyle = '#1a2236'; c.lineWidth = 1; for (let x = 0; x <= AR.w; x += gs) { c.beginPath(); c.moveTo(X(x), Y(0)); c.lineTo(X(x), Y(AR.h)); c.stroke(); } for (let y = 0; y <= AR.h; y += gs) { c.beginPath(); c.moveTo(X(0), Y(y)); c.lineTo(X(AR.w), Y(y)); c.stroke(); }
   c.strokeStyle = '#46557a'; c.lineWidth = 2 * d; c.strokeRect(X(0), Y(AR.h), AR.w * g.s, AR.h * g.s);
   c.font = (10 * d) + 'px system-ui';
@@ -2069,6 +2073,7 @@ function navDraw(dirs, fresh) {
     const tri = (p, psi, col) => { c.save(); c.translate(X(p[0]), Y(p[1])); c.rotate(-psi); c.fillStyle = col; c.beginPath(); c.moveTo(0, -11 * d); c.lineTo(-7 * d, 7 * d); c.lineTo(7 * d, 7 * d); c.closePath(); c.fill(); c.restore(); };
     if (!isEsp()) tri(NV.raw.pos, NV.raw.psi, 'rgba(255,107,107,.9)'); if (NV.src === 'sim' || NV.src === 'espsim') tri(NV.truth.pos, NV.truth.psi, '#ffffff'); tri(NV.flt.pos, NV.flt.psi, '#4f8cff');
     c.restore();
+  }
   }
   // arrow
   const ac = $('nArrow'), ax = ac.getContext('2d'); ax.clearRect(0, 0, 220, 220);
@@ -2195,6 +2200,7 @@ const LINK_ID = 'mdsp-lab-', LINK_LIB = 'https://unpkg.com/peerjs@1.5.5/dist/pee
 function linkOwns(st) { return !!st && (st === LINK.stream || st === LINK.sendStream); }
 async function getCam() {
   if (LINK.stream && LINK.stream.active) return LINK.stream;
+  if (LINK.sendStream && LINK.sendStream.active) return LINK.sendStream;
   return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
 }
 function linkMsg(t) { $('linkMsg').textContent = t; }
@@ -2305,7 +2311,7 @@ const r1 = v => Math.round(v * 10) / 10, rp = a => a.map(p => [r1(p[0]), r1(p[1]
 function thin(path, n) { if (path.length <= n) return path; const st = path.length / n, o = []; for (let i = 0; i < n; i++) o.push(path[Math.floor(i * st)]); o.push(path[path.length - 1]); return o; }
 function linkSendNav() {                            // phone
   if (!LINK.conn || !LINK.conn.open || !NV.flt) return;
-  const full = LINK.navN++ % 10 === 0, m = { k: 'nav', started: !!NV.started, pos: rp([NV.flt.pos])[0], psi: r1(NV.flt.psi * 1000) / 1000, dirs: NV.lastDirs || null,
+  const full = LINK.navN++ % 10 === 0, m = { k: 'nav', started: !!NV.started, biasDone: !!NV.biasDone, line: NV.src === 'line' && NV.line ? { est: NV.line.est, pad: NV.line.padXY || null } : null, pos: rp([NV.flt.pos])[0], psi: r1(NV.flt.psi * 1000) / 1000, dirs: NV.lastDirs || null,
     route: NV.route ? rp([NV.flt.pos, ...NV.route.slice(1)]) : null, rawPos: NV.raw ? rp([NV.raw.pos])[0] : null };
   if (NV.truth && (NV.src === 'sim' || NV.src === 'espsim')) { m.tPos = rp([NV.truth.pos])[0]; m.tPsi = r1(NV.truth.psi * 1000) / 1000; }
   if (full) {
@@ -2322,8 +2328,9 @@ function linkNav(m) {                               // laptop
     linkMsg('LIVE: mirroring the phone\'s Navigate tab (route, position, directions).');
     $('linkCard').style.display = 'none'; setTimeout(() => $('nArrow').scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
   }
-  if (m.map) { AR.w = m.map.w; AR.h = m.map.h; AR.grid = m.map.grid; AR.inflate = m.map.inflate; if (m.map.room) { BC.room = m.map.room; $('nW').value = m.map.room[0]; $('nH').value = m.map.room[1]; } AR.start = m.map.start; AR.goal = m.map.goal; AR.obsList = m.map.obs; NV.src = m.map.src; if (m.map.anchors) BC.anchors = m.map.anchors; document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === NV.src)); }
+  if (m.map) { AR.w = m.map.w; AR.h = m.map.h; AR.grid = m.map.grid; AR.inflate = m.map.inflate; if (m.map.room) { BC.room = m.map.room; $('nW').value = m.map.room[0]; $('nH').value = m.map.room[1]; } AR.start = m.map.start; AR.goal = m.map.goal; AR.obsList = m.map.obs; NV.src = m.map.src; navModeUI(); if (m.map.anchors) BC.anchors = m.map.anchors; document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === NV.src)); }
   if (m.path) NV.flt.path = m.path; if (m.raw) NV.raw.path = m.raw; if (m.tPath) NV.truth.path = m.tPath;
+  NV.biasDone = m.biasDone; if (m.line) { NV.line = NV.line || {}; NV.line.est = m.line.est; NV.line.padXY = m.line.pad; NV.line.img = null; }
   NV.started = m.started; NV.flt.pos = m.pos; NV.flt.psi = m.psi; NV.route = m.route ? [m.pos, ...m.route.slice(1)] : null; NV.lastDirs = m.dirs;
   if (m.rawPos) NV.raw.pos = m.rawPos; if (m.tPos) { NV.truth.pos = m.tPos; NV.truth.psi = m.tPsi; }
   const lp = NV.flt.path[NV.flt.path.length - 1]; if (!lp || Math.hypot(lp[0] - m.pos[0], lp[1] - m.pos[1]) > 1) NV.flt.path.push(m.pos);
@@ -2353,6 +2360,53 @@ $('nRouteCsv').onclick = () => {
   let len = 0; for (let i = 1; i < W.length; i++) len += Math.hypot(W[i][0] - W[i - 1][0], W[i][1] - W[i - 1][1]);
   $('nMsg').textContent = 'Saved drone_route.csv: ' + W.length + ' waypoints, ' + (len / 100).toFixed(2) + ' m. Load it in MATLAB with matlab/route_to_waypoints.m.';
 };
+
+// ---------- Follow track: directions from the track the camera sees ----------
+// Same detection as the Camera tab (colour, threshold and chips from there). The track's angle th
+// (0 = straight ahead, + = heading right) and offset d (px, + = right of centre) give a steering
+// angle sa = th + atan(d / 60 px look-ahead), low-passed; sa picks the spoken instruction.
+function navModeUI() {                               // map legend and optical-flow panels do not apply to Follow track
+  const ln = NV.src === 'line', lg = $('nMap').nextElementSibling, fl = $('nCam').closest('.card');
+  if (lg) lg.style.display = ln ? 'none' : ''; if (fl) fl.style.display = ln ? 'none' : '';
+}
+const lineCv = document.createElement('canvas'); lineCv.width = W * 2; lineCv.height = H * 2;
+function lineStep() {
+  const L = NV.line; if (!L || !vid.videoWidth) return null;
+  const img = grabImage(vid, vid.videoWidth, vid.videoHeight), now = performance.now();
+  const P = pipeline(img, vCol, val('vThr'), { med: true, morph: true, thin: true, roi: vChip.roi, blob: true });
+  const pad = padDetect(img, true); L.pad.push(pad.found ? 1 : 0); if (L.pad.length > 8) L.pad.shift();
+  L.img = img; L.est = P.est ? { th: +P.est.th.toFixed(1), d: +P.est.d.toFixed(1), rho: +P.est.rho.toFixed(1) } : null; L.padXY = pad.found ? [+pad.cx.toFixed(0), +pad.cy.toFixed(0)] : null;
+  if (L.pad.reduce((a, b) => a + b, 0) >= 6) return { arrived: true, turn: 0, text: 'Landing pad: stop', sub: 'blue pad confirmed in 6 of 8 frames', key: 'arrived' };
+  if (!P.est) {
+    if (now - L.lastSeen > 600) return { turn: 0, text: 'Track lost', sub: 'go back until the track is under the phone', key: 'lost', lost: true };
+    return NV.lastDirs;                                // brief dropout: keep the last instruction
+  }
+  L.lastSeen = now;
+  const sa = P.est.th + Math.atan(P.est.d / 60) * R2D; L.sa = 0.6 * L.sa + 0.4 * sa;
+  const a = Math.abs(L.sa), side = L.sa > 0 ? 'right' : 'left', pc = NV.dirClass || 'straight';
+  let cls;
+  if (a > (pc === side ? 32 : 40)) cls = side;
+  else if (a > (pc === 'straight' ? 14 : 8)) cls = 'slight-' + side;
+  else cls = 'straight';
+  NV.dirClass = cls;
+  const TXT = { straight: 'Go straight', left: 'Turn left', right: 'Turn right', 'slight-left': 'Slight left', 'slight-right': 'Slight right' };
+  return { turn: -L.sa * D2R, text: TXT[cls], sub: 'track ' + P.est.th.toFixed(0) + '°, ' + (Math.abs(P.est.d) < 3 ? 'centred' : Math.abs(P.est.d).toFixed(0) + ' px ' + (P.est.d > 0 ? 'right' : 'left') + ' of centre'), key: cls };
+}
+function lineView(c, cv) {                             // camera frame + detected track (phone, or the laptop's copy of the phone's video)
+  const L = NV.line || {}, d = devicePixelRatio || 1;
+  let img = L.img; if (!img && NV.mirror && vid.videoWidth) img = grabImage(vid, vid.videoWidth, vid.videoHeight);
+  const h = cv.height, w = Math.min(cv.width, h * W / H), x0 = (cv.width - w) / 2;
+  c.fillStyle = '#8a96b3'; c.font = (12 * d) + 'px system-ui';
+  if (!img) { c.fillText(NV.mirror ? 'Following the track on the phone (no video on this laptop)' : 'Tap Set start: camera view appears here', 12 * d, 24 * d); }
+  else {
+    const lc = blitRGB(lineCv, img);
+    if (L.est) drawEst(lc, L.est, '#2fbf71', false);
+    if (L.padXY) { const k = lineCv.width / W; lc.strokeStyle = '#3fd0ff'; lc.lineWidth = 3; lc.beginPath(); lc.arc(L.padXY[0] * k, L.padXY[1] * k, 14 * k, 0, 2 * Math.PI); lc.stroke(); }
+    c.imageSmoothingEnabled = false; c.drawImage(lineCv, x0, 0, w, h);
+    c.fillStyle = 'rgba(0,0,0,.55)'; c.fillRect(x0, 0, w, 20 * d); c.fillStyle = '#fff';
+    c.fillText(L.est ? 'track ' + L.est.th.toFixed(0) + '°, offset ' + L.est.d.toFixed(0) + ' px · top of image = ahead' : 'no track in view', x0 + 8 * d, 14 * d);
+  }
+}
 // ---------- main loop ----------
 function updBadge() {
   if (tab === 'vision') vSrc === 'cam' ? setBadge('LIVE camera', 'live') : vSrc === 'photo' ? setBadge('Your photo', 'live') : setBadge('Synthetic track', 'sim');
@@ -2372,7 +2426,7 @@ function loop(now) {
   while (altAcc > 1 / AFS) { altTick(); altAcc -= 1 / AFS; }
   if (tab === 'alt') altDraw();
   if (tab === 'imu') imuDraw();
-  if (tab === 'nav') { let fresh = false; if (NV.started && !NV.mirror && now - lastN > 66 && !NV.trialBusy) { lastN = now; const dd = NV.src === 'sim' ? simStep(1 / 15) : NV.src === 'espsim' ? espSimStep(1 / 15) : NV.src === 'esp' ? (NV.biasDone && NV.gotEsp ? directions() : null) : liveStep(); NV.lastDirs = NV.biasDone ? holdDirs(dd) : null; fresh = true; } navDraw(NV.started ? NV.lastDirs : null, fresh); }
+  if (tab === 'nav') { let fresh = false; if (NV.started && !NV.mirror && now - lastN > 66 && !NV.trialBusy) { lastN = now; const dd = NV.src === 'line' ? lineStep() : NV.src === 'sim' ? simStep(1 / 15) : NV.src === 'espsim' ? espSimStep(1 / 15) : NV.src === 'esp' ? (NV.biasDone && NV.gotEsp ? directions() : null) : liveStep(); NV.lastDirs = NV.biasDone ? holdDirs(dd) : null; fresh = true; } navDraw(NV.started ? NV.lastDirs : null, fresh); }
   if (tab === 'beacon') { if (BC.src === 'sim' && now - lastB > 50) { lastB = now; bSimStep(); } bDraw(); }
   if (tab === 'drone' && now - lastD > 66) { lastD = now; droneStep(); }
   if (tab === 'flight' && now - lastF > 50) { lastF = now; flyStep(); if (fly.fast) flyStep(); flyDraw(); }
