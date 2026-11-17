@@ -1890,7 +1890,7 @@ function navReset(keepCal) {
   NV.truth = { pos: [...AR.start], psi: 0, path: [[...AR.start]] };
   NV.route = astar(AR.start, AR.goal); NV.dist = 0; NV.arrived = false; NV.t = 0; NV.calMode = false; NV.calSum = [0, 0];
   NV.biasSamples = []; NV.bias = 0; NV.biasDone = !nChip.bias; NV.psiComp0 = null; NV.lastRoute = 0; NV.err = null;
-  NV.started = true; NV.q = 0; NV.ms = 0;
+  NV.started = true; NV.q = 0; NV.ms = 0; NV.dirClass = 'straight'; NV.saidGo = false; NV.lastSpoken = ''; NV.hold = { key: null, since: 0 };
   if (NV.src === 'esp') { NV.raw.path = []; NV.flt.path = []; }
 }
 // heading: integrate gyro (both tracks), filtered track removes bias and fuses compass
@@ -1931,14 +1931,25 @@ function directions() {
   const look = isEsp() ? 40 : 12; for (let i = 1; i < R.length; i++) if (Math.hypot(R[i][0] - p[0], R[i][1] - p[1]) > look) { tgt = R[i]; break; }
   const bearing = Math.atan2(-(tgt[0] - p[0]), tgt[1] - p[1]), turn = wrapA(bearing - NV.flt.psi), deg = turn * R2D;
   let left = 0; for (let i = 1; i < R.length; i++) left += Math.hypot(R[i][0] - R[i - 1][0], R[i][1] - R[i - 1][1]);
-  if (Math.abs(deg) > 25) return { turn, text: (deg > 0 ? 'Turn left ' : 'Turn right ') + Math.abs(deg).toFixed(0) + '°', sub: left.toFixed(0) + ' cm to goal', key: deg > 0 ? 'left' : 'right' };
-  return { turn, text: 'Go straight', sub: left.toFixed(0) + ' cm to goal', key: 'straight' };
+  // classes with hysteresis (enter / leave thresholds), so the words do not flicker at a boundary
+  const a = Math.abs(deg), side = deg > 0 ? 'left' : 'right', pc = NV.dirClass || 'straight';
+  let cls;
+  if (a > (pc === 'around' ? 125 : 135)) cls = 'around';
+  else if (a > (pc === side ? 50 : 60)) cls = side;
+  else if (a > (pc === 'straight' ? 30 : 15)) cls = 'slight-' + side;
+  else cls = 'straight';
+  NV.dirClass = cls;
+  const TXT = { straight: 'Go straight', around: 'Turn around', left: 'Turn left', right: 'Turn right', 'slight-left': 'Slight left', 'slight-right': 'Slight right' };
+  return { turn, text: TXT[cls], sub: (cls === 'straight' ? '' : a.toFixed(0) + '° ' + side + ' · ') + left.toFixed(0) + ' cm to goal', key: cls };
 }
 function speak(key, text) {
-  if (!NV.voice || !window.speechSynthesis) return; const now = performance.now();
-  if (key === NV.lastSpoken && now - NV.lastSpeakT < 6000) return; if (now - NV.lastSpeakT < 1800) return;
+  if (!NV.voice || !window.speechSynthesis) return; const now = performance.now(), changed = key !== NV.lastSpoken;
+  if (!changed && key === 'arrived') return;                                          // say it once
+  if (!changed && now - NV.lastSpeakT < (key === 'straight' ? 8000 : 4000)) return;   // reminder while it still applies
+  if (changed && now - NV.lastSpeakT < 400) return;                                   // tiny debounce
+  if (!NV.saidGo && key !== 'arrived') { text = 'Go. ' + text; NV.saidGo = true; }
   NV.lastSpoken = key; NV.lastSpeakT = now;
-  try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(text.replace('°', ' degrees').replace('✓', ''))); } catch (e) {}
+  try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text.replace('°', ' degrees').replace('✓', '')); u.rate = 1.15; speechSynthesis.speak(u); } catch (e) {}
 }
 // sim pilot follows the directions using the filtered estimate (like a person following the app)
 function simStep(dt) {
@@ -1990,15 +2001,15 @@ document.querySelectorAll('[data-nsrc]').forEach(b => b.onclick = async () => {
   }
   NV.src = s; document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === s));
   $('nMsg').textContent = '';
-  if (s === 'espsim' || s === 'esp') { $('nHint').textContent = s === 'espsim' ? 'Simulated ESP32 anchors in the room corners (A4 optional). A virtual person carries the phone and follows the directions. Position comes from noisy RSSI: red = raw trilateration, blue = median + Kalman chain, white = truth.' : 'Live: put ESP32 anchors A1, A2, A3 in the room corners shown on the map, carry the phone + drone ESP32, tap Set start and follow the arrow.'; NV.started = false; $('nInstr').textContent = 'Tap Set start'; $('nSub').textContent = 'room ' + (AR.w / 100) + ' × ' + (AR.h / 100) + ' m'; return; }
+  if (s === 'espsim' || s === 'esp') { $('nHint').textContent = s === 'espsim' ? 'Simulated ESP32 anchors in the room corners (A4 optional). A virtual person carries the phone and follows the directions. Position comes from noisy RSSI: red = raw trilateration, blue = median + Kalman chain, white = truth.' : 'Live: put ESP32 anchors A1, A2, A3 in the room corners shown on the map, carry the phone + drone ESP32. At START: phone flat, screen up, top edge pointing up the map (green arrow at START). Tap Set start, hold still until you hear "Go", then follow the arrow.'; NV.started = false; $('nInstr').textContent = 'Tap Set start'; $('nSub').textContent = 'room ' + (AR.w / 100) + ' × ' + (AR.h / 100) + ' m'; return; }
   $('nHint').textContent = s === 'sim' ? 'Simulation: a virtual phone flies over a textured floor and follows the app\'s directions. White = true path, blue = filtered estimate, red = raw estimate.'
-    : 'Live: hold the phone flat, screen up, about 30 cm above a textured surface (newspaper, tiles, wood). Top edge = forward. ' + (NV.camCal ? 'Calibration loaded.' : 'Do "Calibrate 50 cm" once first.') + ' Then put the phone on START facing up the map and tap Set start.';
+    : 'Live: hold the phone flat, screen up, about 30 cm above a textured surface (newspaper, tiles, wood). Top edge = forward. ' + (NV.camCal ? 'Calibration loaded.' : 'Do "Calibrate 50 cm" once first.') + ' Then put the phone on START, top edge pointing up the map (green arrow), tap Set start and hold still until you hear "Go".';
   NV.started = false; $('nInstr').textContent = 'Tap Set start'; $('nSub').textContent = s === 'sim' ? 'the virtual phone will fly to the goal' : 'hold still for 1 s after tapping';
 });
 $('nStart').onclick = () => {
   if (NV.src === 'cam' && !NV.camCal) { $('nMsg').textContent = 'Tip: calibrate first so distances are in real cm. Using a rough default for now.'; NV.k = 0.08; }
-  try { speechSynthesis.speak(new SpeechSynthesisUtterance(NV.voice ? 'Starting. Hold still.' : '')); } catch (e) {}
-  navReset(); $('nInstr').textContent = 'Hold still…'; $('nSub').textContent = 'measuring gyro bias (1 s)';
+  try { speechSynthesis.cancel(); if (NV.voice) speechSynthesis.speak(new SpeechSynthesisUtterance('Hold still')); } catch (e) {}
+  navReset(); NV.lastSpeakT = performance.now(); $('nInstr').textContent = 'Hold still…'; $('nSub').textContent = 'phone flat, top edge pointing up the map · wait for "Go"';
 };
 $('nCal').onclick = () => {
   if (!NV.started) navReset();
@@ -2040,6 +2051,12 @@ function navDraw(dirs, fresh) {
   c.fillStyle = '#8a96b3'; c.fillText(gs + ' cm grid' + (NV.obsMode ? ' · tap to add/remove obstacles' : ''), X(AR.w * 0.35), Y(0) - 5 * d);
   if (isEsp()) BC.anchors.forEach((a, i) => { const ax = X(a[0] * 100), ay = Y(a[1] * 100); c.fillStyle = '#2fbf71'; c.beginPath(); c.moveTo(ax, ay - 9 * d); c.lineTo(ax - 8 * d, ay + 6 * d); c.lineTo(ax + 8 * d, ay + 6 * d); c.fill(); c.fillText('A' + (i + 1), ax + 9 * d, ay + (a[1] > 0 ? 14 : -8) * d); });
   c.fillStyle = '#2fbf71'; c.beginPath(); c.arc(X(AR.start[0]), Y(AR.start[1]), 6 * d, 0, 2 * Math.PI); c.fill(); c.fillText('START', X(AR.start[0]) + 8 * d, Y(AR.start[1]) + 4 * d);
+  if (!NV.started || !NV.biasDone) {                 // the phone's top edge must point this way when you tap Set start
+    const sx = X(AR.start[0]), sy = Y(AR.start[1]), L = Math.min(55 * d, AR.h * g.s * 0.35);
+    c.strokeStyle = '#2fbf71'; c.fillStyle = '#2fbf71'; c.lineWidth = 3 * d; c.beginPath(); c.moveTo(sx, sy - 8 * d); c.lineTo(sx, sy - L); c.stroke();
+    c.beginPath(); c.moveTo(sx, sy - L - 9 * d); c.lineTo(sx - 7 * d, sy - L + 3 * d); c.lineTo(sx + 7 * d, sy - L + 3 * d); c.fill();
+    c.fillText('face this way', sx + 9 * d, sy - L + 4 * d);
+  }
   c.fillStyle = '#ffd23f'; c.beginPath(); c.arc(X(AR.goal[0]), Y(AR.goal[1]), 7 * d, 0, 2 * Math.PI); c.fill(); c.fillText('GOAL', X(AR.goal[0]) - 32 * d, Y(AR.goal[1]) - 10 * d);
   const line = (arr, col, w, dash) => { if (!arr || arr.length < 2) return; c.strokeStyle = col; c.lineWidth = w * d; c.setLineDash(dash ? [6 * d, 5 * d] : []); c.beginPath(); arr.forEach((p, i) => i ? c.lineTo(X(p[0]), Y(p[1])) : c.moveTo(X(p[0]), Y(p[1]))); c.stroke(); c.setLineDash([]); };
   if (NV.started) {
@@ -2059,7 +2076,7 @@ function navDraw(dirs, fresh) {
     ax.save(); ax.translate(110, 110);
     if (dirs.arrived) { ax.strokeStyle = '#2fbf71'; ax.lineWidth = 16; ax.beginPath(); ax.moveTo(-45, 0); ax.lineTo(-10, 38); ax.lineTo(50, -40); ax.stroke(); }
     else { ax.rotate(-dirs.turn); ax.fillStyle = Math.abs(dirs.turn * R2D) > 25 ? '#ffb020' : '#4f8cff'; ax.beginPath(); ax.moveTo(0, -85); ax.lineTo(55, -20); ax.lineTo(20, -20); ax.lineTo(20, 75); ax.lineTo(-20, 75); ax.lineTo(-20, -20); ax.lineTo(-55, -20); ax.closePath(); ax.fill(); }
-    ax.restore(); $('nInstr').textContent = dirs.text; $('nSub').textContent = dirs.sub; if (fresh) speak(dirs.key, dirs.text);
+    ax.restore(); $('nInstr').textContent = dirs.text; $('nSub').textContent = dirs.sub; if (fresh && dirs.stable) speak(dirs.key, dirs.text);
   }
   // camera patch + correlation surface
   if (NV.lastGray) {
@@ -2161,11 +2178,11 @@ async function espConnect() {
   return dev.name || 'ESP32';
 }
 
-function holdDirs(d) {
-  if (!d) return d; const H = NV.hold || (NV.hold = { key: null, n: 0, shown: null }), need = isEsp() ? 5 : 2;
-  if (d.key === H.key) H.n++; else { H.key = d.key; H.n = 1; }
-  if (d.arrived || !H.shown || H.n >= need) H.shown = d;
-  return H.shown.key === d.key ? d : { ...d, text: H.shown.text, key: H.shown.key };
+function holdDirs(d) {                               // display stays live; the voice waits until the instruction is steady
+  if (!d) return d; const H = NV.hold || (NV.hold = { key: null, since: 0 }), now = performance.now();
+  if (d.key !== H.key) { H.key = d.key; H.since = now; }
+  d.stable = !!d.arrived || now - H.since >= (isEsp() ? 600 : 250);    // ESP32 position is noisier: wait a bit longer
+  return d;
 }
 
 // ---------- phone -> laptop link (WebRTC via PeerJS) ----------

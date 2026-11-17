@@ -111,3 +111,8 @@
 - Tested with two headless Chromium pages, a local PeerJS server and a fake camera/motion source (camera 640x480 on the laptop, IMU live with the phone's 20 deg tilt, Drone LIVE camera + LIVE IMU, stop/reconnect).
 - Navigate mirroring: the phone sends `{k:'nav', ...}` 10×/s (pos, psi, dirs, remaining route; every 10th message also map: w, h, grid, inflate, room, start, goal, obstacles, src, anchors, and thinned paths). The laptop sets `NV.mirror`, which stops its own nav stepping and gyro heading, and draws the phone's state. `linkEndMirror()` on disconnect.
 - Route export (`#nRouteCsv`): A* START→GOAL, cut to corners with `clearLine()` (string pulling, keeps the obstacle margin). CSV: i, x_cm, y_cm, x_fwd_m (= Δy), y_right_m (= Δx). Phone and laptop export the same file because the map, grid and margin are mirrored.
+
+## Navigate voice
+- `directions()` gives short classes with hysteresis: Go straight (<15/30°), Slight left/right, Turn left/right (>50/60°), Turn around (>125/135°); degrees go in the sub-line, not the speech.
+- `holdDirs()` keeps the display live and marks `d.stable` once the class has held 250 ms (600 ms with ESP32). `speak()` only speaks stable instructions, cancels a stale sentence the moment the class changes, repeats turns every 4 s and straight every 8 s, says Arrived once, and prefixes the first one with "Go.".
+- Start: green "face this way" arrow at START (heading 0 = up the map). Tap Set start, hold still ~1 s (gyro bias) until "Go".
