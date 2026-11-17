@@ -350,6 +350,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
       <button class="btn" id="nObsMode">Edit obstacles</button>
       <button class="btn" id="nObsClear">Clear obstacles</button>
       <button class="btn" id="nA4">4th anchor (far corner)</button>
+      <button class="btn" id="nRouteCsv">Route → CSV (for the drone)</button>
     </div>
     <div class="row">
       <button class="btn pri" id="nStart">Set start</button>
@@ -1894,7 +1895,7 @@ function navReset(keepCal) {
 }
 // heading: integrate gyro (both tracks), filtered track removes bias and fuses compass
 function headingStep(rateDeg, dt, compassDeg) {
-  if (!NV.started) return;
+  if (!NV.started || NV.mirror) return;
   if (!NV.biasDone) { NV.biasSamples.push(rateDeg); if (NV.biasSamples.length * dt >= 1.0) { NV.bias = NV.biasSamples.reduce((a, b) => a + b, 0) / NV.biasSamples.length; NV.biasDone = true; } return; }
   NV.raw.psi = wrapA(NV.raw.psi + rateDeg * D2R * dt);
   let p = NV.flt.psi + (rateDeg - (nChip.bias ? NV.bias : 0)) * D2R * dt;
@@ -2190,6 +2191,7 @@ function loadPeerJS() {
 }
 function linkStop(quiet) {
   window.removeEventListener('devicemotion', linkFwdMotion); window.removeEventListener('deviceorientationabsolute', linkFwdOrient);
+  if (LINK.navTimer) { clearInterval(LINK.navTimer); LINK.navTimer = null; } linkEndMirror();
   for (const k of ['call', 'conn']) { try { if (LINK[k]) LINK[k].close(); } catch (e) {} LINK[k] = null; }
   try { if (LINK.peer) LINK.peer.destroy(); } catch (e) {} LINK.peer = null;
   if (LINK.stream) {                                // laptop: fall back to the synthetic sources
@@ -2220,7 +2222,7 @@ async function linkReceive() {                      // laptop side
     LINK.conn = c;
     c.on('open', () => linkMsg('Phone connected, waiting for its camera…'));
     c.on('data', linkData);
-    c.on('close', () => { if (LINK.conn === c) { linkMsg('Phone disconnected. The code still works: tap "Phone: send" again.'); LINK.conn = null; if (LINK.stream) { if (camStream === LINK.stream) camStream = null; if (vSrc === 'cam') selectSrc('synth'); if (drone.src === 'cam') drone.src = 'synth'; LINK.stream = null; } LINK.gotData = false; } });
+    c.on('close', () => { if (LINK.conn === c) { linkMsg('Phone disconnected. The code still works: tap "Phone: send" again.'); LINK.conn = null; if (LINK.stream) { if (camStream === LINK.stream) camStream = null; if (vSrc === 'cam') selectSrc('synth'); if (drone.src === 'cam') drone.src = 'synth'; LINK.stream = null; } LINK.gotData = false; linkEndMirror(); } });
   });
   peer.on('call', call => { if (LINK.call) try { LINK.call.close(); } catch (e) {} LINK.call = call; call.answer(); call.on('stream', linkGotStream); });
 }
@@ -2230,10 +2232,10 @@ async function linkGotStream(st) {
   try { await vid.play(); } catch (e) {}
   selectSrc('cam'); if (drone.on || tab === 'drone') drone.src = 'cam';
   $('linkBtn').classList.add('on');
-  linkMsg('LIVE: the phone\'s camera and motion sensors now drive this laptop. Camera, IMU, Drone and Navigate all use them (tap Start / Phone camera there as usual).');
+  if (!NV.mirror) linkMsg('LIVE: the phone\'s camera and motion sensors now drive this laptop. Camera, IMU, Drone and Navigate all use them (tap Start / Phone camera there as usual).');
 }
 function linkData(d) {                              // laptop: replay the phone's sensor events
-  if (!Array.isArray(d)) return;
+  if (!Array.isArray(d)) { if (d && d.k === 'nav') linkNav(d); return; }
   LINK.gotData = true;
   if (d[0] === 'm') {
     if (!LINK.motionOn) { LINK.motionOn = true; if (!imu.live) { window.removeEventListener('devicemotion', onMotion); window.addEventListener('devicemotion', onMotion); } }   // relayed data needs no sensor permission on the laptop
@@ -2271,6 +2273,7 @@ async function linkSend() {                         // phone side
       $('linkBtn').classList.add('on');
       linkMsg('Sending ' + (LINK.sendStream ? 'camera + ' : '') + 'motion sensors to the laptop. Keep this page open and the screen on; hold the phone as each tab says.');
       try { if (navigator.wakeLock) LINK.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+      LINK.navN = 0; LINK.navTimer = setInterval(linkSendNav, 100);
     });
     c.on('close', () => { if (LINK.conn === c) { linkStop(true); linkMsg('Laptop disconnected.'); } });
   });
@@ -2278,11 +2281,67 @@ async function linkSend() {                         // phone side
 $('linkBtn').onclick = () => { const c = $('linkCard'); c.style.display = c.style.display === 'none' ? '' : 'none'; };
 $('linkRecv').onclick = linkReceive; $('linkSend').onclick = linkSend; $('linkStopBtn').onclick = () => linkStop();
 { const lc = new URLSearchParams(location.search).get('link'); if (lc) { $('linkCode').value = lc; $('linkCard').style.display = ''; linkMsg('Tap "Phone: send" to stream this phone to the laptop.'); } }
+
+// Navigate mirroring: the phone (with the ESP32 over Bluetooth) is the navigator; it sends its
+// map, route, position, path and directions 10x per second and the laptop draws the same map.
+const r1 = v => Math.round(v * 10) / 10, rp = a => a.map(p => [r1(p[0]), r1(p[1])]);
+function thin(path, n) { if (path.length <= n) return path; const st = path.length / n, o = []; for (let i = 0; i < n; i++) o.push(path[Math.floor(i * st)]); o.push(path[path.length - 1]); return o; }
+function linkSendNav() {                            // phone
+  if (!LINK.conn || !LINK.conn.open || !NV.flt) return;
+  const full = LINK.navN++ % 10 === 0, m = { k: 'nav', started: !!NV.started, pos: rp([NV.flt.pos])[0], psi: r1(NV.flt.psi * 1000) / 1000, dirs: NV.lastDirs || null,
+    route: NV.route ? rp([NV.flt.pos, ...NV.route.slice(1)]) : null, rawPos: NV.raw ? rp([NV.raw.pos])[0] : null };
+  if (NV.truth && (NV.src === 'sim' || NV.src === 'espsim')) { m.tPos = rp([NV.truth.pos])[0]; m.tPsi = r1(NV.truth.psi * 1000) / 1000; }
+  if (full) {
+    m.map = { w: AR.w, h: AR.h, grid: AR.grid, inflate: AR.inflate, room: BC.room, start: AR.start, goal: AR.goal, obs: AR.obsList, src: NV.src, anchors: BC.anchors };
+    m.path = rp(thin(NV.flt.path, 400)); if (NV.raw) m.raw = rp(NV.raw.path.slice(-90)); if (m.tPos) m.tPath = rp(thin(NV.truth.path, 400));
+  }
+  LINK.conn.send(m);
+}
+function linkNav(m) {                               // laptop
+  LINK.gotData = true;
+  if (!NV.mirror) {
+    NV.mirror = true; navReset(true); NV.flt.path = []; NV.raw.path = []; NV.truth.path = [];
+    showTab('nav'); $('nMsg').textContent = 'Mirroring the phone: route, position and directions come from the phone. "Route → CSV" saves the route for the drone.';
+    linkMsg('LIVE: mirroring the phone\'s Navigate tab (route, position, directions).');
+    $('linkCard').style.display = 'none'; setTimeout(() => $('nArrow').scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  }
+  if (m.map) { AR.w = m.map.w; AR.h = m.map.h; AR.grid = m.map.grid; AR.inflate = m.map.inflate; if (m.map.room) { BC.room = m.map.room; $('nW').value = m.map.room[0]; $('nH').value = m.map.room[1]; } AR.start = m.map.start; AR.goal = m.map.goal; AR.obsList = m.map.obs; NV.src = m.map.src; if (m.map.anchors) BC.anchors = m.map.anchors; document.querySelectorAll('[data-nsrc]').forEach(x => x.classList.toggle('on', x.dataset.nsrc === NV.src)); }
+  if (m.path) NV.flt.path = m.path; if (m.raw) NV.raw.path = m.raw; if (m.tPath) NV.truth.path = m.tPath;
+  NV.started = m.started; NV.flt.pos = m.pos; NV.flt.psi = m.psi; NV.route = m.route ? [m.pos, ...m.route.slice(1)] : null; NV.lastDirs = m.dirs;
+  if (m.rawPos) NV.raw.pos = m.rawPos; if (m.tPos) { NV.truth.pos = m.tPos; NV.truth.psi = m.tPsi; }
+  const lp = NV.flt.path[NV.flt.path.length - 1]; if (!lp || Math.hypot(lp[0] - m.pos[0], lp[1] - m.pos[1]) > 1) NV.flt.path.push(m.pos);
+}
+function linkEndMirror() { if (NV.mirror) { NV.mirror = false; NV.started = false; NV.lastDirs = null; $('nMsg').textContent = 'Phone disconnected: stopped mirroring.'; } }
+// Route export: the planned A* route from START to GOAL, cut down to its corner points.
+// Columns: map cm (x right, y up the map) and drone metres relative to START, with the drone
+// starting on START facing up the map (x forward, y right, as in the Simulink minidrone's NED frame).
+function clearLine(a, b) {                           // straight segment stays clear of obstacles (with the safety margin)
+  const n = Math.max(2, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2));
+  for (let i = 0; i <= n; i++) { const t = i / n; if (blocked(a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))) return false; }
+  return true;
+}
+function routeCorners(R) {                           // keep only the corners needed to get around obstacles
+  const o = [R[0]]; let i = 0;
+  while (i < R.length - 1) { let j = R.length - 1; while (j > i + 1 && !clearLine(R[i], R[j])) j--; o.push(R[j]); i = j; }
+  return o;
+}
+$('nRouteCsv').onclick = () => {
+  const R = astar(AR.start, AR.goal);
+  if (!R || R.length < 2) { $('nMsg').textContent = 'No route from START to GOAL (blocked by obstacles?).'; return; }
+  const W = routeCorners(R), s0 = AR.start;
+  let csv = '# Mini-drone route from the DSP lab Navigate tab, ' + new Date().toISOString() + '\n# room ' + (AR.w / 100) + ' x ' + (AR.h / 100) + ' m, start ' + s0.join(',') + ' cm, goal ' + AR.goal.join(',') + ' cm\n# drone frame: starts on START facing up the map; x_fwd forward, y_right right (metres)\n';
+  csv += 'i,x_cm,y_cm,x_fwd_m,y_right_m\n';
+  W.forEach((p, i) => { csv += [i, p[0].toFixed(1), p[1].toFixed(1), ((p[1] - s0[1]) / 100).toFixed(3), ((p[0] - s0[0]) / 100).toFixed(3)].join(',') + '\n'; });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'drone_route.csv'; a.click();
+  let len = 0; for (let i = 1; i < W.length; i++) len += Math.hypot(W[i][0] - W[i - 1][0], W[i][1] - W[i - 1][1]);
+  $('nMsg').textContent = 'Saved drone_route.csv: ' + W.length + ' waypoints, ' + (len / 100).toFixed(2) + ' m. Load it in MATLAB with matlab/route_to_waypoints.m.';
+};
 // ---------- main loop ----------
 function updBadge() {
   if (tab === 'vision') vSrc === 'cam' ? setBadge('LIVE camera', 'live') : vSrc === 'photo' ? setBadge('Your photo', 'live') : setBadge('Synthetic track', 'sim');
   else if (tab === 'drone') setBadge((drone.src === 'cam' ? 'LIVE camera' : 'synthetic track') + ' · ' + (imu.live ? 'LIVE IMU' : 'sim IMU'), drone.src === 'cam' && imu.live ? 'live' : 'sim');
   else if (tab === 'results') setBadge('Experiments', '');
+  else if (tab === 'nav' && NV.mirror) setBadge('Mirroring phone · ' + (NV.src === 'esp' ? 'ESP32' : NV.src === 'espsim' ? 'simulated ESP32' : NV.src === 'cam' ? 'camera' : 'simulation'), 'live');
   else if (tab === 'nav') NV.src === 'sim' ? setBadge('Simulated floor', 'sim') : setBadge('LIVE camera + gyro', 'live');
   else if (tab === 'beacon') BC.src === 'sim' ? setBadge('Simulated ESP32s', 'sim') : setBadge(BC.src === 'csv' ? 'Replaying ESP32 log' : 'LIVE ESP32', 'live');
   else if (tab === 'imu') imu.live ? setBadge('LIVE phone sensors', 'live') : setBadge('SIMULATED sensors', 'sim');
@@ -2296,7 +2355,7 @@ function loop(now) {
   while (altAcc > 1 / AFS) { altTick(); altAcc -= 1 / AFS; }
   if (tab === 'alt') altDraw();
   if (tab === 'imu') imuDraw();
-  if (tab === 'nav') { let fresh = false; if (NV.started && now - lastN > 66 && !NV.trialBusy) { lastN = now; const dd = NV.src === 'sim' ? simStep(1 / 15) : NV.src === 'espsim' ? espSimStep(1 / 15) : NV.src === 'esp' ? (NV.biasDone && NV.gotEsp ? directions() : null) : liveStep(); NV.lastDirs = NV.biasDone ? holdDirs(dd) : null; fresh = true; } navDraw(NV.started ? NV.lastDirs : null, fresh); }
+  if (tab === 'nav') { let fresh = false; if (NV.started && !NV.mirror && now - lastN > 66 && !NV.trialBusy) { lastN = now; const dd = NV.src === 'sim' ? simStep(1 / 15) : NV.src === 'espsim' ? espSimStep(1 / 15) : NV.src === 'esp' ? (NV.biasDone && NV.gotEsp ? directions() : null) : liveStep(); NV.lastDirs = NV.biasDone ? holdDirs(dd) : null; fresh = true; } navDraw(NV.started ? NV.lastDirs : null, fresh); }
   if (tab === 'beacon') { if (BC.src === 'sim' && now - lastB > 50) { lastB = now; bSimStep(); } bDraw(); }
   if (tab === 'drone' && now - lastD > 66) { lastD = now; droneStep(); }
   if (tab === 'flight' && now - lastF > 50) { lastF = now; flyStep(); if (fly.fast) flyStep(); flyDraw(); }
