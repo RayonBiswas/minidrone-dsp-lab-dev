@@ -136,3 +136,11 @@
 - Walls: darker than 0.72 × local mean, not reddish (r > g+25 and b+25 never a wall), and ≥ 60% paper in a (4·rad+1)² window counting off-photo as not paper (excludes the paper edge, keeps wall junctions). Box per side: long-line profile unless it disagrees with the wall extent (0.3/99.7 pct) by > 4%.
 - Solver: wall holes closed (box filter, ~1.2% of side), Dijkstra over (pixel, heading), step 1 + 40/d², turn penalty max(3, 3% of side) → fewest turns among near-equal routes.
 - Verified with 4 generated mazes (perfect and with loops) + photo-like copies (rotation ±8°, keystone, uneven light, blur, noise, brown table): turn counts equal the true BFS shortest path (corner entrance can add 1); 0 crossings of dark pixels.
+
+## Explore tab (2026-11-19)
+- State `EX`; grid 160×160 at 10 cm, origin = start, heading 0 = up the map, + CCW, forward = (-sin ψ, cos ψ).
+- `exStep(dt)`: sim → `exRender()` (per-column ray cast into boxes and people, floor checker, noise) + simulated IMU (steps 1.6 Hz, gyro bias 0.6°/s, compass noise); live → camera frame at 96 px wide + real IMU via the devicemotion handler. Then `exScan` → `exTrack` → `exIntegrate` → TTC → `exPlan` (every 0.4 s) → `exDirections`.
+- `exMotion()` is shared by sim and live: up vector (low-passed gravity), yaw = ω·up, 1 s bias, compass 1 %, step peaks 1-5 m/s² on |a| band-pass (3 Hz LP − 0.3 Hz LP), bump > 7 m/s² on |a| − 0.5 Hz LP. Between steps the position is predicted along the stride, centred on the peak (−0.5 step), and held at the last step when walking stops.
+- Moving tracks: `n > 8`, `spd > 0.3`, displacement > 0.4 m, `onFree > 0.5` (detection cell seen free, no cell > 0.7 within 20 cm), width 0.2-0.8 m with `wdDev < 0.1`. Undecided (n ≤ 8) and moving segments are not marked occupied (free space in front is still cleared), except cells already > 1.5.
+- Sim walker: body radius 0.2 m, 0.8 m/s, obeys the arrow, stops on Stop / Collision; contact only blocks motion that goes further in.
+- Known limits: floor-colour segmentation needs a floor that differs from obstacles; nearest visible floor ~0.9 m at 1.2 m height and 22° pitch (closer obstacles rely on the map / bump); step counting gains up to half a step at each stop; moving-person confirmation is conservative (often treated as a temporary static obstacle instead).

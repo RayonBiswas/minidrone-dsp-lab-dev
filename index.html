@@ -64,7 +64,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 </head>
 <body>
 <header>
-  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-18c</small></h1>
+  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-19</small></h1>
   <span class="badge" id="badge">idle</span>
   <button class="btn" id="linkBtn" style="padding:5px 10px;font-size:12px">📡 Phone → Laptop</button>
 </header>
@@ -82,6 +82,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
   <button data-tab="flight">Flight</button>
   <button data-tab="drone">Drone</button>
   <button data-tab="nav" id="navTabBtn">Navigate</button>
+  <button data-tab="explore">Explore</button>
   <button data-tab="results">Results</button>
 </nav>
 
@@ -466,6 +467,49 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 </section>
 
 <!-- ================= RESULTS ================= -->
+<section id="explore">
+  <div class="card">
+    <h3>Explore: map, detect, avoid and traverse (classical DSP + image processing only)</h3>
+    <div class="pipe">
+      <span class="chip">Forward camera</span><span class="arr">→</span><span class="chip">Floor colour model</span><span class="arr">→</span>
+      <span class="chip">Column scan</span><span class="arr">→</span><span class="chip">Ground-plane range</span><span class="arr">→</span><span class="chip">Median</span><span class="arr">→</span>
+      <span class="chip">Occupancy grid (log-odds)</span><span class="arr">→</span><span class="chip">Kalman tracks: static / moving</span><span class="arr">→</span>
+      <span class="chip">TTC + bump detect</span><span class="arr">→</span><span class="chip">A* replan</span><span class="arr">→</span><span class="chip">Arrow + voice</span>
+      <span class="arr">|</span><span class="chip">Steps (band-pass + peaks)</span><span class="arr">→</span><span class="chip">Gyro ⊕ compass heading</span><span class="arr">→</span><span class="chip">Position</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn on" data-xsrc="sim">Simulate room</button>
+      <button class="btn" data-xsrc="live">Live phone</button>
+      <button class="btn pri" id="exStart">Start</button>
+      <button class="btn" id="exStop">Stop</button>
+      <button class="btn" id="exLearn">Learn floor</button>
+      <button class="btn" id="exClear">Clear map</button>
+      <button class="btn" id="exTruth">Show truth (sim)</button>
+    </div>
+    <div class="row">
+      <label class="hint" style="display:flex;align-items:center;gap:6px">Camera height <input id="exH" type="number" min="0.1" max="2.5" step="0.05" value="1.2" style="width:60px"> m</label>
+      <label class="hint" style="display:flex;align-items:center;gap:6px">Camera vertical FOV <input id="exFov" type="number" min="30" max="100" step="1" value="62" style="width:56px">°</label>
+      <label class="hint" style="display:flex;align-items:center;gap:6px">Step length <input id="exStepL" type="number" min="0.2" max="1.2" step="0.05" value="0.5" style="width:60px"> m</label>
+      <label class="hint" style="display:flex;align-items:center;gap:6px">Body radius <input id="exR" type="number" min="0.1" max="0.6" step="0.05" value="0.3" style="width:56px"> m</label>
+    </div>
+    <p class="hint" id="exHint">Simulated room: static boxes and two people walking across. A virtual person carries the phone and follows the app; everything it knows comes from the camera image and the simulated motion sensors. Tap the map to set a goal.</p>
+    <p class="msg" id="exMsg"></p>
+  </div>
+  <div class="card">
+    <div class="row" style="align-items:center;flex-wrap:nowrap">
+      <canvas id="exArrow" width="220" height="220" style="width:96px;height:96px;background:#0b101a;border-radius:14px;flex:none"></canvas>
+      <div><div id="exInstr" style="font-size:22px;font-weight:700">Tap Start</div><div class="hint" id="exSub">–</div></div>
+    </div>
+    <canvas id="exMap" style="width:100%;height:380px;display:block;margin-top:10px;background:#0b101a;border-radius:10px;touch-action:none"></canvas>
+    <div class="hint" style="margin-top:6px">dark = unknown · blue = seen free · white = obstacle (static) · orange = moving obstacle + 2 s prediction · yellow = route · blue line = walked · red × = collision</div>
+  </div>
+  <div class="card">
+    <div class="cols" style="display:grid;gap:10px">
+      <div><canvas id="exCam" style="width:100%;aspect-ratio:4/3;display:block;background:#0b101a;border-radius:10px"></canvas><div class="hint">camera · green = floor · red = obstacle base · line = horizon</div></div>
+      <div class="hint" id="exStats" style="font:12px/1.6 ui-monospace,monospace;white-space:pre">–</div>
+    </div>
+  </div>
+</section>
 <section id="results">
   <div class="card">
     <h3>Results: every comparison from the proposal</h3>
@@ -2678,11 +2722,305 @@ $('mzCsv').onclick = () => {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'drone_route_maze.csv'; a.click();
   $('mzMsg').textContent = 'Saved drone_route_maze.csv (' + MZ.cm.length + ' points). In MATLAB: route_to_waypoints.m picks up the newest drone_route*.csv.';
 };
+
+// ======================= EXPLORE: map, detect, avoid, traverse (classical only) =======================
+// Camera: a floor colour model learned at the start; each image column is scanned up from the bottom to the first
+// non-floor pixels (obstacle base). Flat-floor pinhole geometry turns that row into a distance (camera height h,
+// pitch from gravity, vertical FOV) -> a "virtual laser scan". Scans update a log-odds occupancy grid along
+// Bresenham rays. Compact segments are tracked with constant-velocity Kalman filters; fast ones are moving
+// obstacles (kept out of the static map, their next 2 s are blocked for the planner). Collision: time-to-collision
+// from the forward range rate, and a bump detector (high-passed |acceleration|). Position: step detection
+// (band-passed |a| peaks) x step length along the heading (gyro yaw rate about gravity, bias removed, compass fused).
+const EX = { src: 'sim', on: false, G: 0.1, NX: 160, NY: 160, AW: 96, AH: 72, showTruth: true };
+EX.ox = EX.NX >> 1; EX.oy = EX.NY >> 1;
+let exSeed = 7; const exRnd = () => { exSeed |= 0; exSeed = exSeed + 0x6D2B79F5 | 0; let t = Math.imul(exSeed ^ exSeed >>> 15, 1 | exSeed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const exGauss = () => { let u = 0, v = 0; while (!u) u = exRnd(); while (!v) v = exRnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+const fwdV = psi => [-Math.sin(psi), Math.cos(psi)];                   // heading 0 = up the map, + = counter-clockwise
+function exReset() {
+  const N = EX.NX * EX.NY;
+  EX.lo = new Float32Array(N); EX.seen = new Uint8Array(N); EX.tracks = []; EX.nextId = 1; EX.collisions = []; EX.walked = [[0, 0]];
+  EX.pose = { x: 0, y: 0, psi: 0 }; EX.pdr = { lastPos: [0, 0], lastT: 0, period: 0.6, steps: 0, lp: 9.81, slow: 9.81, prev: 0, prev2: 0, lastStepT: -9, bias: 0, biasN: 0, biasS: 0, comp0: null, hpLp: 9.81, lastBump: -9 };
+  EX.route = null; EX.lastPlan = 0; EX.goal = EX.goal || null; EX.t = 0; EX.rf = null; EX.drf = 0; EX.ttc = Infinity; EX.dirs = null; EX.arrived = false; EX.dist = 0;
+  EX.up = [0, 0.5, 0.87]; EX.floor = null; EX.scan = null; EX.frame = null;
+}
+// ---------- simulated room (truth) ----------
+function exWorldInit() {
+  const W = EX.world = { w: 8, h: 6, start: [1.0, 0.9], objs: [], people: [] };
+  const box = (x0, y0, x1, y1, ht, col) => W.objs.push({ k: 'box', b: [x0, y0, x1, y1], ht, col });
+  box(-0.2, -0.2, 8.2, 0, 2.5, [0.68, 0.74, 0.86]); box(-0.2, 6, 8.2, 6.2, 2.5, [0.68, 0.74, 0.86]); box(-0.2, 0, 0, 6, 2.5, [0.68, 0.74, 0.86]); box(8, 0, 8.2, 6, 2.5, [0.68, 0.74, 0.86]);
+  box(2.4, 2.0, 3.4, 2.8, 0.8, [0.48, 0.31, 0.17]); box(4.6, 0.0, 5.2, 2.6, 1.0, [0.2, 0.32, 0.62]); box(5.6, 3.8, 6.6, 4.6, 0.9, [0.48, 0.31, 0.17]); box(1.2, 4.2, 2.0, 5.0, 0.7, [0.25, 0.5, 0.45]);
+  W.people.push({ a: [3.8, 0.6], b: [3.8, 5.4], s: 0.55, u: 0.1, r: 0.25, col: [0.78, 0.18, 0.2] }, { a: [6.0, 1.2], b: [7.6, 1.2], s: 0.45, u: 0.6, r: 0.25, col: [0.2, 0.62, 0.3] });
+  W.truth = { x: W.start[0], y: W.start[1], psi: 0, v: 0 }; W.t = 0; W.stepPhase = 0;
+  if (!EX.goal) EX.goal = [7.3 - W.start[0], 5.3 - W.start[1]];        // map frame = start at (0,0), facing up
+}
+function exPeople(t) { return EX.world.people.map(P => { const L = Math.hypot(P.b[0] - P.a[0], P.b[1] - P.a[1]), ph = ((P.u * L + P.s * t) % (2 * L) + 2 * L) % (2 * L), q = ph < L ? ph / L : 2 - ph / L;
+  return { x: P.a[0] + q * (P.b[0] - P.a[0]), y: P.a[1] + q * (P.b[1] - P.a[1]), r: P.r, col: P.col, ht: 1.7, vx: (ph < L ? 1 : -1) * P.s * (P.b[0] - P.a[0]) / L, vy: (ph < L ? 1 : -1) * P.s * (P.b[1] - P.a[1]) / L }; }); }
+function exRay(ox, oy, dx, dy, t) {                  // nearest hit of a horizontal ray with boxes and people
+  let best = { t: 1e9, o: null };
+  for (const o of EX.world.objs) { const [x0, y0, x1, y1] = o.b; let tmin = -1e9, tmax = 1e9;
+    for (const [p, d, lo, hi] of [[ox, dx, x0, x1], [oy, dy, y0, y1]]) { if (Math.abs(d) < 1e-9) { if (p < lo || p > hi) { tmin = 1e9; break; } } else { let a = (lo - p) / d, b = (hi - p) / d; if (a > b) [a, b] = [b, a]; tmin = Math.max(tmin, a); tmax = Math.min(tmax, b); } }
+    if (tmin <= tmax && tmin > 0.01 && tmin < best.t) best = { t: tmin, o }; }
+  for (const P of t) { const fx = ox - P.x, fy = oy - P.y, b = fx * dx + fy * dy, c = fx * fx + fy * fy - P.r * P.r, disc = b * b - c; if (disc >= 0) { const tt = -b - Math.sqrt(disc); if (tt > 0.01 && tt < best.t) best = { t: tt, o: P }; } }
+  return best;
+}
+function exRender(pose, dep0, h, vfov, ppl) {        // simulated forward camera image (RGB 0..1)
+  const { AW, AH } = EX, img = new Float32Array(AW * AH * 3), fy = (AH / 2) / Math.tan(vfov / 2), fx = fy;
+  for (let x = 0; x < AW; x++) {
+    const a = Math.atan((x - AW / 2 + 0.5) / fx), b = pose.psi - a, [dx, dy] = fwdV(b), hit = exRay(pose.x, pose.y, dx, dy, ppl), cosA = Math.cos(a);
+    for (let y = 0; y < AH; y++) {
+      const dep = dep0 + Math.atan((y - AH / 2 + 0.5) / fy), i = (y * AW + x) * 3; let c;
+      const df = dep > 0.002 ? h / Math.tan(dep) / cosA : 1e9;               // floor distance along this ray
+      if (df < hit.t) { const wx = pose.x + dx * df, wy = pose.y + dy * df, chk = ((Math.floor(wx * 2) + Math.floor(wy * 2)) & 1) ? 1.04 : 0.96; c = [0.76 * chk, 0.68 * chk, 0.54 * chk]; }
+      else { const ht = h - hit.t * cosA * Math.tan(dep); if (hit.o && ht >= 0 && ht <= hit.o.ht) { const sh = 1 - 0.05 * hit.t; c = hit.o.col.map(v => v * sh); } else c = [0.55, 0.58, 0.64]; }
+      for (let k = 0; k < 3; k++) img[i + k] = Math.max(0, Math.min(1, c[k] + 0.025 * exGauss()));
+    } }
+  return img;
+}
+// ---------- image processing: floor model + column scan -> range per column ----------
+function exFeat(img, i) { const r = img[i], g = img[i + 1], b = img[i + 2], s = r + g + b + 1e-3; return [r / s, g / s, s / 3]; }
+function exLearnFloor(img) {                           // bottom 20% of the image, middle 60% of the columns
+  const { AW, AH } = EX; let n = 0, m = [0, 0, 0], q = [0, 0, 0];
+  for (let y = Math.floor(AH * 0.8); y < AH; y++) for (let x = Math.floor(AW * 0.2); x < AW * 0.8; x++) { const f = exFeat(img, (y * AW + x) * 3); for (let k = 0; k < 3; k++) { m[k] += f[k]; q[k] += f[k] * f[k]; } n++; }
+  m = m.map(v => v / n); const sd = q.map((v, k) => Math.sqrt(Math.max(0, v / n - m[k] * m[k])));
+  EX.floor = { m, s: [Math.max(sd[0], 0.012), Math.max(sd[1], 0.012), Math.max(3 * sd[2], 0.15 * m[2])] };
+}
+const exIsFloor = (f, F) => ((f[0] - F.m[0]) / F.s[0]) ** 2 + ((f[1] - F.m[1]) / F.s[1]) ** 2 + ((f[2] - F.m[2]) / F.s[2]) ** 2 < 9;
+function exScan(img, dep0, h, vfov) {
+  const { AW, AH } = EX, F = EX.floor, fy = (AH / 2) / Math.tan(vfov / 2), fx = fy, Rmax = 3.5;
+  const yh = Math.max(0, Math.ceil(AH / 2 - 0.5 - fy * Math.tan(dep0)));     // first row below the horizon
+  const raw = [], mask = new Uint8Array(AW * AH);
+  for (let x = 0; x < AW; x++) { let run = 0, yo = -1;
+    for (let y = AH - 1; y >= yh; y--) { const fl = exIsFloor(exFeat(img, (y * AW + x) * 3), F); mask[y * AW + x] = fl ? 1 : 0; if (!fl) { if (++run >= 3) { yo = y + 2; break; } } else run = 0; }
+    const a = Math.atan((x - AW / 2 + 0.5) / fx);
+    if (yo >= 0) { const dep = dep0 + Math.atan((yo - AH / 2 + 0.5) / fy), r = dep > 0.01 ? h / Math.tan(dep) / Math.cos(a) : Rmax; raw.push({ a, r: Math.min(r, Rmax), hit: r < Rmax, y: yo }); }
+    else raw.push({ a, r: Math.min(Rmax, dep0 + Math.atan((yh - AH / 2 + 0.5) / fy) > 0.01 ? h / Math.tan(dep0 + Math.atan((yh - AH / 2 + 0.5) / fy)) : Rmax), hit: false, y: -1 }); }
+  const out = raw.map((c, x) => { const win = raw.slice(Math.max(0, x - 2), Math.min(AW, x + 3)), rs = win.map(w => w.r).sort((p, q) => p - q), hits = win.filter(w => w.hit).length;   // 5-column median
+    return { a: c.a, r: rs[rs.length >> 1], hit: hits * 2 > win.length, y: c.y }; });
+  // keep the floor model up to date (slow running mean over the bottom rows that are floor)
+  let n = 0, m = [0, 0, 0]; for (let y = AH - 4; y < AH; y++) for (let x = 0; x < AW; x += 2) if (mask[y * AW + x]) { const f = exFeat(img, (y * AW + x) * 3); for (let k = 0; k < 3; k++) m[k] += f[k]; n++; }
+  if (n > 20) for (let k = 0; k < 3; k++) F.m[k] = 0.98 * F.m[k] + 0.02 * m[k] / n;
+  return { cols: out, mask, yh };
+}
+// ---------- occupancy grid ----------
+const exCell = (x, y) => { const gx = Math.floor(x / EX.G) + EX.ox, gy = Math.floor(y / EX.G) + EX.oy; return gx >= 0 && gy >= 0 && gx < EX.NX && gy < EX.NY ? gy * EX.NX + gx : -1; };
+function exIntegrate(scan, pose, skip) {
+  const { NX, G } = EX, x0 = Math.floor(pose.x / G) + EX.ox, y0 = Math.floor(pose.y / G) + EX.oy;
+  for (let k = 0; k < scan.cols.length; k += 2) { const c = scan.cols[k], [hx, hy] = fwdV(pose.psi - c.a), hc = exCell(pose.x + hx * c.r, pose.y + hy * c.r);
+    const sk = skip[k] && !(hc >= 0 && EX.lo[hc] > 1.5), rr = sk ? Math.max(0, c.r - 0.3) : c.r;   // a cell already seen as obstacle several times is never erased by the moving-object logic
+    const [dx, dy] = fwdV(pose.psi - c.a), ex = pose.x + dx * rr, ey = pose.y + dy * rr, x1 = Math.floor(ex / G) + EX.ox, y1 = Math.floor(ey / G) + EX.oy;
+    let x = x0, y = y0; const sx = x1 > x0 ? 1 : -1, sy = y1 > y0 ? 1 : -1, ddx = Math.abs(x1 - x0), ddy = Math.abs(y1 - y0); let err = ddx - ddy;
+    for (let n = 0; n < 200; n++) { if (x === x1 && y === y1) break; if (x >= 0 && y >= 0 && x < NX && y < EX.NY) { const i = y * NX + x; EX.lo[i] = Math.max(-4, EX.lo[i] - 0.4); EX.seen[i] = 1; }
+      const e2 = 2 * err; if (e2 > -ddy) { err -= ddy; x += sx; } if (e2 < ddx) { err += ddx; y += sy; } }
+    if (c.hit && !sk && x1 >= 0 && y1 >= 0 && x1 < NX && y1 < EX.NY) { const i = y1 * NX + x1; EX.lo[i] = Math.min(4, EX.lo[i] + 0.9); EX.seen[i] = 1; } }
+}
+// ---------- tracking: compact segments -> constant-velocity Kalman filters ----------
+function exTrack(scan, pose, dt) {
+  const segs = [], C = scan.cols; let cur = null;
+  for (let k = 0; k < C.length; k++) { const c = C[k];
+    if (c.hit && cur && Math.abs(c.r - C[k - 1].r) < 0.3) cur.ks.push(k); else { if (cur) segs.push(cur); cur = c.hit ? { ks: [k] } : null; } }
+  if (cur) segs.push(cur);
+  const dets = [];
+  for (const sg of segs) { if (sg.ks.length < 3) continue; const k0 = sg.ks[0], k1 = sg.ks[sg.ks.length - 1]; if (k0 <= 1 && k1 >= C.length - 2) continue;   // spans the whole view: a wall
+    const pts = sg.ks.map(k => { const [dx, dy] = fwdV(pose.psi - C[k].a); return [pose.x + dx * C[k].r, pose.y + dy * C[k].r]; }), wd = Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]);
+    if (wd > 0.8) continue;                            // walls and big furniture are static map, not tracks
+    const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length, cy = pts.reduce((a, p) => a + p[1], 0) / pts.length; dets.push({ x: cx, y: cy, ks: sg.ks, wd, edge: k0 <= 1 || k1 >= C.length - 2, used: false }); }
+  // constant-velocity Kalman filter per axis: state [pos, vel], measured pos (R = 0.15 m), process noise accel 0.8 m/s^2
+  const qa = 0.64, Rm = 0.0225;
+  for (const T of EX.tracks) for (const a of ['x', 'y']) { const v = 'v' + a, P = T['P' + a]; T[a] += T[v] * dt;
+    const p11 = P[0] + dt * (2 * P[1] + dt * P[2]) + qa * dt ** 4 / 4, p12 = P[1] + dt * P[2] + qa * dt ** 3 / 2, p22 = P[2] + qa * dt * dt; T['P' + a] = [p11, p12, p22]; }
+  for (const T of EX.tracks) { T.age += dt; T.miss += dt; }
+  for (const T of EX.tracks) { let best = null, bd = 0.6 + 0.6 * T.miss; for (const d of dets) if (!d.used) { const e = Math.hypot(d.x - T.x, d.y - T.y); if (e < bd) { bd = e; best = d; } }
+    if (!best) continue; best.used = true; T.miss = 0; T.n++; T.ks = best.ks;
+    if (!best.edge) { const w0 = T.wd == null ? best.wd : T.wd; T.wd = 0.8 * w0 + 0.2 * best.wd; T.wdDev = 0.8 * (T.wdDev == null ? 0.1 : T.wdDev) + 0.2 * Math.abs(best.wd - w0); }   // a person keeps one width; a box edge being revealed grows
+    let loMax = -9; for (let oy = -0.2; oy <= 0.21; oy += 0.1) for (let ox = -0.2; ox <= 0.21; ox += 0.1) { const c = exCell(best.x + ox, best.y + oy); if (c >= 0 && EX.seen[c]) loMax = Math.max(loMax, EX.lo[c]); }
+    const c0 = exCell(best.x, best.y), lo0 = c0 >= 0 && EX.seen[c0] ? EX.lo[c0] : 0;
+    T.onFree = 0.8 * (T.onFree || 0) + 0.2 * (loMax < 0.7 && lo0 < -0.3 ? 1 : 0);   // standing on floor seen free before, no mapped obstacle within 20 cm (a box edge always has one; cells hidden behind a person are unknown and ignored)
+    for (const a of ['x', 'y']) { const v = 'v' + a, [p11, p12, p22] = T['P' + a], S = p11 + Rm, k1 = p11 / S, k2 = p12 / S, inn = best[a] - T[a];
+      T[a] += k1 * inn; T[v] += k2 * inn; T['P' + a] = [(1 - k1) * p11, (1 - k1) * p12, p22 - k2 * p12]; }
+    const sp = Math.hypot(T.vx, T.vy); T.spd = 0.7 * T.spd + 0.3 * sp;
+    T.moving = T.n > 8 && T.spd > 0.3 && Math.hypot(T.x - T.x0, T.y - T.y0) > 0.4 && T.onFree > 0.5 && T.wd > 0.2 && T.wd < 0.8 && T.wdDev < 0.1; }   // walking over seen-free floor: a person; sliding along mapped obstacle cells: a box edge seen from a new angle   // a static object's visible part shifts as you walk by; a person actually travels
+  for (const d of dets) if (!d.used) EX.tracks.push({ id: EX.nextId++, x0: d.x, y0: d.y, x: d.x, y: d.y, vx: 0, vy: 0, Px: [Rm, 0, 1], Py: [Rm, 0, 1], n: 1, age: 0, miss: 0, spd: 0, moving: false, ks: d.ks });
+  EX.tracks = EX.tracks.filter(T => T.miss < (T.moving ? 2.0 : 1.0) && Math.abs(T.x) < 8 && Math.abs(T.y) < 8);
+  // small objects stay out of the static map until the tracker has decided: moving ones never go in, still ones go in after ~0.5 s
+  const skip = new Uint8Array(C.length); for (const T of EX.tracks) if (T.miss === 0 && (T.moving || T.n <= 8)) for (const k of T.ks) skip[k] = 1;
+  return skip;
+}
+// ---------- planning ----------
+function exPlan() {
+  const { NX, NY, G } = EX, N = NX * NY, R = val('exR'), occ = new Uint8Array(N);
+  for (let i = 0; i < N; i++) if (EX.lo[i] > 0.7) occ[i] = 1;
+  for (const T of EX.tracks) if (T.moving) for (let t = 0; t <= 2; t += 0.25) { const c = exCell(T.x + T.vx * t, T.y + T.vy * t); if (c >= 0) occ[c] = 1; }   // block a moving obstacle's next 2 s
+  const dist = new Float32Array(N).fill(1e9), q = []; for (let i = 0; i < N; i++) if (occ[i]) { dist[i] = 0; q.push(i); }
+  for (let k = 0; k < q.length; k++) { const p = q[k], x = p % NX, y = (p / NX) | 0; if (dist[p] > R + 0.4) continue;
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j; if ((i || j) && xx >= 0 && yy >= 0 && xx < NX && yy < NY) { const r = yy * NX + xx, nd = dist[p] + (i && j ? 1.414 : 1) * G; if (nd < dist[r]) { dist[r] = nd; q.push(r); } } } }
+  const s = exCell(EX.pose.x, EX.pose.y), g = exCell(EX.goal[0], EX.goal[1]); if (s < 0 || g < 0) return null;
+  // obstacle cells are impassable; the body-radius margin is expensive (not forbidden, so you can always step out of it)
+  const cellCost = i => dist[i] < 0.05 ? Infinity : 1 + (dist[i] < R ? 25 : 0) + (dist[i] < R + 0.4 ? 3 * (R + 0.4 - Math.max(dist[i], R)) / 0.4 : 0) + (EX.seen[i] ? 0 : 0.6);
+  const cost = new Float32Array(N).fill(Infinity), par = new Int32Array(N).fill(-1), hp = [], hv = []; cost[s] = 0;
+  const push = (i, c) => { hp.push(i); hv.push(c); let k = hp.length - 1; while (k) { const pa = (k - 1) >> 1; if (hv[pa] <= hv[k]) break; [hp[pa], hp[k]] = [hp[k], hp[pa]]; [hv[pa], hv[k]] = [hv[k], hv[pa]]; k = pa; } };
+  const pop = () => { const top = hp[0], li = hp.pop(), lv = hv.pop(); if (hp.length) { hp[0] = li; hv[0] = lv; let k = 0; for (;;) { const a = 2 * k + 1, b = a + 1; let m = k; if (a < hp.length && hv[a] < hv[m]) m = a; if (b < hp.length && hv[b] < hv[m]) m = b; if (m === k) break; [hp[m], hp[k]] = [hp[k], hp[m]]; [hv[m], hv[k]] = [hv[k], hv[m]]; k = m; } } return top; };
+  const gx = g % NX, gy = (g / NX) | 0, hh = i => { const dx = Math.abs(i % NX - gx), dy = Math.abs(((i / NX) | 0) - gy); return (dx + dy + (1.414 - 2) * Math.min(dx, dy)); };
+  const closed = new Uint8Array(N); push(s, hh(s));
+  while (hp.length) { const p = pop(); if (closed[p]) continue; closed[p] = 1; if (p === g) break; const x = p % NX, y = (p / NX) | 0;
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j; if ((!i && !j) || xx < 0 || yy < 0 || xx >= NX || yy >= NY) continue; const r = yy * NX + xx; if (closed[r]) continue; const cc = cellCost(r); if (!isFinite(cc) && r !== g) continue;
+      const nc = cost[p] + (i && j ? 1.414 : 1) * (isFinite(cc) ? cc : 1); if (nc < cost[r]) { cost[r] = nc; par[r] = p; push(r, nc + hh(r)); } } }
+  if (!isFinite(cost[g])) return null;
+  const path = []; for (let p = g; p >= 0; p = par[p]) path.push([(p % NX - EX.ox + 0.5) * G, (((p / NX) | 0) - EX.oy + 0.5) * G]); return path.reverse();
+}
+function exDirections() {
+  const P = EX.pose, g = EX.goal, dG = Math.hypot(g[0] - P.x, g[1] - P.y);
+  if (dG < 0.45) return { arrived: true, turn: 0, text: 'Arrived ✓', sub: 'within ' + (dG * 100).toFixed(0) + ' cm of the goal (estimate)', key: 'arrived' };
+  if (EX.bump) return { stop: true, turn: 0, text: 'Collision! Stop', sub: 'bump detected by the accelerometer, marked on the map; a new route follows', key: 'collision' };   // no stepping back: step counting cannot tell a backward step
+  if (EX.rf != null && (EX.rf < 0.55 || EX.ttc < 1.5)) return { stop: true, turn: 0, text: 'Stop', sub: 'obstacle ' + EX.rf.toFixed(1) + ' m ahead' + (isFinite(EX.ttc) ? ', time to collision ' + EX.ttc.toFixed(1) + ' s' : ''), key: 'stop' };
+  if (!EX.route) return { stop: true, turn: 0, text: 'No way through', sub: 'every route is blocked; wait or clear the map', key: 'noroute' };
+  const R = EX.route; let tgt = R[R.length - 1]; for (const q of R) if (Math.hypot(q[0] - P.x, q[1] - P.y) > 0.45) { tgt = q; break; }   // short look-ahead: does not cut corners
+  const turn = wrapA(Math.atan2(-(tgt[0] - P.x), tgt[1] - P.y) - P.psi), a = Math.abs(turn * R2D), side = turn > 0 ? 'left' : 'right', pc = EX.cls || 'straight';
+  let cls; if (a > (pc === 'around' ? 125 : 135)) cls = 'around'; else if (a > (pc === side ? 50 : 60)) cls = side; else if (a > (pc === 'straight' ? 30 : 15)) cls = 'slight-' + side; else cls = 'straight'; EX.cls = cls;
+  let left = 0; for (let i = 1; i < R.length; i++) left += Math.hypot(R[i][0] - R[i - 1][0], R[i][1] - R[i - 1][1]);
+  const TXT = { straight: 'Go straight', around: 'Turn around', left: 'Turn left', right: 'Turn right', 'slight-left': 'Slight left', 'slight-right': 'Slight right' };
+  return { turn, text: TXT[cls], sub: (cls === 'straight' ? '' : a.toFixed(0) + '° ' + side + ' · ') + left.toFixed(1) + ' m to goal', key: cls };
+}
+// ---------- motion sensors: steps, heading, bump (same code for the simulated and the real phone) ----------
+function exMotion(aig, rate, dt, t, compassDeg) {     // aig: accel incl. gravity (m/s^2, device axes); rate: [beta, gamma, alpha] deg/s
+  const D = EX.pdr, am = Math.hypot(aig[0], aig[1], aig[2]);
+  const k = Math.min(1, dt / 0.25); EX.up = EX.up.map((u, i) => u + k * (aig[i] / Math.max(am, 1e-3) - u)); const un = Math.hypot(...EX.up); EX.up = EX.up.map(u => u / un);
+  const yaw = rate[0] * EX.up[0] + rate[1] * EX.up[1] + rate[2] * EX.up[2];   // rotation about gravity = turning (deg/s)
+  if (t < 1.0) { D.biasS += yaw; D.biasN++; D.bias = D.biasS / D.biasN; return; }   // hold still for 1 s: gyro bias
+  EX.pose.psi = wrapA(EX.pose.psi + (yaw - D.bias) * D2R * dt);
+  if (compassDeg != null) { if (D.comp0 == null) D.comp0 = compassDeg - EX.pose.psi * R2D; EX.pose.psi = wrapA(EX.pose.psi + 0.01 * wrapA((compassDeg - D.comp0) * D2R - EX.pose.psi)); }
+  // steps: band-pass |a| (low-pass 3 Hz minus a 0.3 Hz mean), a peak above +1.0 m/s^2, at least 0.3 s apart
+  D.lp += Math.min(1, dt * 2 * Math.PI * 3) * (am - D.lp); D.slow += Math.min(1, dt * 2 * Math.PI * 0.3) * (am - D.slow); const bp = D.lp - D.slow;
+  // a step is a 1-5 m/s^2 peak; a bump is bigger and is not a step
+  if (D.prev > D.prev2 && D.prev > bp && D.prev > 1.0 && D.prev < 5.0 && t - D.lastBump > 0.6 && t - D.lastStepT > 0.3) { const L = val('exStepL'), f = fwdV(EX.pose.psi);
+    D.period = Math.min(1.2, Math.max(0.3, t - D.lastStepT)); D.lastStepT = t; D.steps++; D.lastPos = [D.lastPos[0] + L * f[0], D.lastPos[1] + L * f[1]]; EX.dist += L; }
+  D.prev2 = D.prev; D.prev = bp;
+  // bump: |a| minus its 0.5 Hz mean above 7 m/s^2 (walking stays well below)
+  D.hpLp += Math.min(1, dt * 2 * Math.PI * 0.5) * (am - D.hpLp);
+  if (Math.abs(am - D.hpLp) > 7 && t - D.lastBump > 1.0) { D.lastBump = t; EX.bump = 1.2; const f = fwdV(EX.pose.psi), cx = EX.pose.x + 0.35 * f[0], cy = EX.pose.y + 0.35 * f[1]; EX.collisions.push([cx, cy]);
+    // a bump means "something is right in front of me": block an arc 0.3-0.6 m ahead, +-50 deg, so the next route turns away
+    for (let a = -50; a <= 50; a += 10) for (let r = 0.3; r <= 0.61; r += 0.1) { const [dx, dy] = fwdV(EX.pose.psi + a * D2R), c = exCell(EX.pose.x + r * dx, EX.pose.y + r * dy); if (c >= 0) { EX.lo[c] = 4; EX.seen[c] = 1; } } EX.lastPlan = -9; }
+  // continuous position between steps (walking pace), snapped to the step positions
+  // between steps: predict along the stride; if no step comes, hold the last confirmed step
+  // the |a| peak comes mid-stride: centre the prediction on it
+  const walking = t - D.lastStepT < 1.5 * D.period, fr = walking ? Math.min(1, (t - D.lastStepT) / D.period) - 0.5 : 0, f2 = fwdV(EX.pose.psi), L = val('exStepL');
+  EX.pose.x = D.lastPos[0] + fr * L * f2[0]; EX.pose.y = D.lastPos[1] + fr * L * f2[1];
+}
+// ---------- one step of the pipeline ----------
+function exStep(dt) {
+  EX.t += dt; const h = val('exH'), vfov = val('exFov') * D2R;
+  let img, dep0;
+  if (EX.src === 'sim') {
+    const W = EX.world, T = W.truth, ppl = exPeople(W.t); W.t += dt;
+    // the virtual person follows the app (like a person reading the arrow), walking 0.8 m/s
+    const d = EX.dirs; let rate = 0, v = 0;
+    if (EX.t > 1.2 && d && !d.arrived && !d.stop) { rate = Math.max(-80, Math.min(80, d.turn * R2D * 2.2)); if (Math.abs(d.turn * R2D) < 35) v = 0.8; }
+    T.psi = wrapA(T.psi + rate * D2R * dt); const f = fwdV(T.psi), nx = T.x + v * dt * f[0], ny = T.y + v * dt * f[1];
+    const clr = (x, y) => Math.min(...W.objs.map(o => Math.hypot(Math.max(o.b[0] - x, 0, x - o.b[2]), Math.max(o.b[1] - y, 0, y - o.b[3]))), ...ppl.map(P => Math.hypot(x - P.x, y - P.y) - P.r));
+    const hitObj = clr(nx, ny) < 0.2 && clr(nx, ny) < clr(T.x, T.y);   // body radius 0.2 m; moving away from a contact is allowed
+    let bumpA = 0; if (hitObj && v > 0) { bumpA = W.inContact ? 0 : 14; v = 0; if (!W.inContact) { W.collided = (W.collided || 0) + 1; (W.hitWhat = W.hitWhat || []).push(ppl.some(P => Math.hypot(nx - P.x, ny - P.y) < P.r + 0.2) ? 'person' : 'box'); } W.inContact = true; } else { T.x = nx; T.y = ny; W.inContact = false; }
+    // simulated sensors: steps at 1.6 Hz while walking, gyro with bias + noise, compass with noise, phone pitched 22° down
+    W.stepPhase += v > 0 ? 2 * Math.PI * 1.6 * dt : 0; const g = 9.81, pitch = 22 * D2R;
+    const am = g + (Math.abs(v) > 0 ? 2.2 * Math.sin(W.stepPhase) : 0) + 0.15 * exGauss() + bumpA;
+    const aig = [0, am * Math.cos(pitch), am * Math.sin(pitch)];               // up vector tilted: camera looks 22° below the horizon
+    const yaw = rate + 0.6 + 0.4 * exGauss(), up = [0, Math.cos(pitch), Math.sin(pitch)], compass = wrapA(T.psi) * R2D + 4 * exGauss();
+    exMotion(aig, [yaw * up[0], yaw * up[1], yaw * up[2]], dt, EX.t, compass);
+    dep0 = Math.asin(Math.max(-1, Math.min(1, EX.up[2])));
+    const camPose = { x: T.x, y: T.y, psi: T.psi }; img = exRender(camPose, pitch, h, vfov, ppl);
+    if (!EX.floor && EX.t > 0.3) exLearnFloor(img);
+  } else {
+    if (!vid.videoWidth) return; const vw = vid.videoWidth, vh = vid.videoHeight; EX.AH = Math.round(EX.AW * vh / vw);
+    const c = exStep.cv || (exStep.cv = document.createElement('canvas')); c.width = EX.AW; c.height = EX.AH; const cx = c.getContext('2d', { willReadFrequently: true }); cx.drawImage(vid, 0, 0, EX.AW, EX.AH);
+    const D = cx.getImageData(0, 0, EX.AW, EX.AH).data; img = new Float32Array(EX.AW * EX.AH * 3); for (let i = 0, j = 0; i < D.length; i += 4, j += 3) { img[j] = D[i] / 255; img[j + 1] = D[i + 1] / 255; img[j + 2] = D[i + 2] / 255; }
+    dep0 = Math.asin(Math.max(-1, Math.min(1, EX.up[2] * (EX.upSign || 1))));
+    if (EX.t > 2 && dep0 < -0.15 && !EX.upSign) EX.upSign = -1;              // some phones report gravity with the opposite sign
+    if (EX.wantLearn) { exLearnFloor(img); EX.wantLearn = false; }
+  }
+  EX.frame = img; if (EX.bump) EX.bump = Math.max(0, EX.bump - dt);
+  if (!EX.floor || EX.t < 1.0) { EX.dirs = { stop: true, turn: 0, text: 'Hold still…', sub: EX.floor ? 'measuring gyro bias' : 'point the camera at clear floor, then Learn floor', key: 'hold' }; return; }
+  const scan = exScan(img, dep0, h, vfov); EX.scan = scan; EX.dep0 = dep0;
+  const skip = exTrack(scan, EX.pose, dt); exIntegrate(scan, EX.pose, skip);
+  // time to collision from the forward ±12° range (low-passed range and range rate)
+  const fw = scan.cols.filter(c => Math.abs(c.a) < 12 * D2R), rmin = Math.min(...fw.map(c => c.hit ? c.r : 9));
+  if (rmin < 9) { if (EX.rf == null || EX.rf > 8) { EX.rf = rmin; EX.drf = 0; } else { const r0 = EX.rf; EX.rf = 0.6 * EX.rf + 0.4 * rmin; EX.drf = 0.7 * EX.drf + 0.3 * (EX.rf - r0) / dt; } } else { EX.rf = 9; EX.drf = 0; }
+  EX.ttc = EX.rf < 9 && EX.drf < -0.15 ? EX.rf / -EX.drf : Infinity;
+  for (const T of EX.tracks) if (T.moving) { const dx = T.x - EX.pose.x, dy = T.y - EX.pose.y, r = Math.hypot(dx, dy), close = -(dx * T.vx + dy * T.vy) / Math.max(r, 1e-3); if (close > 0.1 && r < 2.5) EX.ttc = Math.min(EX.ttc, r / close); }
+  const w = EX.walked[EX.walked.length - 1]; if (Math.hypot(EX.pose.x - w[0], EX.pose.y - w[1]) > 0.1) EX.walked.push([EX.pose.x, EX.pose.y]);
+  if (EX.goal && EX.t - EX.lastPlan > 0.4) { EX.lastPlan = EX.t; EX.route = exPlan(); }
+  if (EX.goal) { EX.dirs = exDirections(); EX.arrived = !!EX.dirs.arrived; }
+}
+// ---------- drawing ----------
+function exDraw() {
+  const cv = $('exMap'), d = sizeCanvas(cv), c = cv.getContext('2d'), { NX, NY, G } = EX; c.clearRect(0, 0, cv.width, cv.height);
+  if (!EX.lo) { c.fillStyle = '#8a96b3'; c.font = (12 * d) + 'px system-ui'; c.fillText('Tap Start', 12 * d, 24 * d); return; }
+  // view: 9 x 7 m around the start (sim room) or around the person
+  const ar = cv.height / cv.width, vw = EX.src === 'sim' ? Math.max(8.6, 6.6 / ar) : 9, vh = vw * ar, cx0 = EX.src === 'sim' ? 3.0 : EX.pose.x, cy0 = EX.src === 'sim' ? 2.1 : EX.pose.y, s = cv.width / vw;
+  const X = x => (x - cx0 + vw / 2) * s, Y = y => cv.height - (y - cy0 + vh / 2) * s; EX.view = { cx0, cy0, vw, vh, s };
+  const im = c.createImageData(cv.width, cv.height), px = im.data;
+  for (let yy = 0; yy < cv.height; yy += 2) for (let xx = 0; xx < cv.width; xx += 2) { const wx = xx / s + cx0 - vw / 2, wy = (cv.height - yy) / s + cy0 - vh / 2, i = exCell(wx, wy); let col = [11, 16, 26];
+    if (i >= 0 && EX.seen[i]) { const p = 1 / (1 + Math.exp(-EX.lo[i])); col = p > 0.67 ? [230, 235, 245] : p < 0.33 ? [29, 42, 68] : [55, 62, 80]; }
+    for (let j = 0; j < 2; j++) for (let k = 0; k < 2; k++) { const o = ((yy + j) * cv.width + xx + k) * 4; if (o < px.length) { px[o] = col[0]; px[o + 1] = col[1]; px[o + 2] = col[2]; px[o + 3] = 255; } } }
+  c.putImageData(im, 0, 0);
+  const line = (arr, col, w, dash) => { if (!arr || arr.length < 2) return; c.strokeStyle = col; c.lineWidth = w * d; c.setLineDash(dash ? [6 * d, 5 * d] : []); c.beginPath(); arr.forEach((p, i) => i ? c.lineTo(X(p[0]), Y(p[1])) : c.moveTo(X(p[0]), Y(p[1]))); c.stroke(); c.setLineDash([]); };
+  if (EX.src === 'sim' && EX.showTruth && EX.world) { const W = EX.world, o0 = W.start; c.strokeStyle = 'rgba(255,255,255,.35)'; c.lineWidth = d; c.setLineDash([3 * d, 3 * d]);
+    for (const o of W.objs) c.strokeRect(X(o.b[0] - o0[0]), Y(o.b[3] - o0[1]), (o.b[2] - o.b[0]) * s, (o.b[3] - o.b[1]) * s);
+    for (const P of exPeople(W.t)) { c.beginPath(); c.arc(X(P.x - o0[0]), Y(P.y - o0[1]), P.r * s, 0, 7); c.stroke(); } c.setLineDash([]);
+    const T = W.truth; c.save(); c.translate(X(T.x - o0[0]), Y(T.y - o0[1])); c.rotate(-T.psi); c.strokeStyle = '#fff'; c.lineWidth = 1.5 * d; c.beginPath(); c.moveTo(0, -10 * d); c.lineTo(-6 * d, 6 * d); c.lineTo(6 * d, 6 * d); c.closePath(); c.stroke(); c.restore(); }
+  line(EX.walked, '#4f8cff', 2.2); if (EX.route) line(EX.route, '#ffd23f', 2, true);
+  if (EX.scan) { c.fillStyle = 'rgba(255,90,95,.8)'; for (let k = 0; k < EX.scan.cols.length; k += 3) { const q = EX.scan.cols[k]; if (!q.hit) continue; const [dx, dy] = fwdV(EX.pose.psi - q.a); c.fillRect(X(EX.pose.x + dx * q.r) - 1.5 * d, Y(EX.pose.y + dy * q.r) - 1.5 * d, 3 * d, 3 * d); } }
+  for (const T of EX.tracks) if (T.moving) { c.strokeStyle = '#ff9f1a'; c.fillStyle = 'rgba(255,159,26,.35)'; c.lineWidth = 2 * d; c.beginPath(); c.arc(X(T.x), Y(T.y), 0.28 * s, 0, 7); c.fill(); c.stroke();
+    c.setLineDash([4 * d, 3 * d]); c.beginPath(); c.moveTo(X(T.x), Y(T.y)); c.lineTo(X(T.x + 2 * T.vx), Y(T.y + 2 * T.vy)); c.stroke(); c.setLineDash([]); }
+  c.strokeStyle = '#ff5a5f'; c.lineWidth = 2.5 * d; for (const [x, y] of EX.collisions) { c.beginPath(); c.moveTo(X(x) - 6 * d, Y(y) - 6 * d); c.lineTo(X(x) + 6 * d, Y(y) + 6 * d); c.moveTo(X(x) + 6 * d, Y(y) - 6 * d); c.lineTo(X(x) - 6 * d, Y(y) + 6 * d); c.stroke(); }
+  if (EX.goal) { c.fillStyle = '#ffd23f'; c.beginPath(); c.arc(X(EX.goal[0]), Y(EX.goal[1]), 7 * d, 0, 7); c.fill(); c.font = (10 * d) + 'px system-ui'; c.fillText('GOAL', X(EX.goal[0]) + 9 * d, Y(EX.goal[1]) + 4 * d); }
+  c.save(); c.translate(X(EX.pose.x), Y(EX.pose.y)); c.rotate(-EX.pose.psi); c.fillStyle = '#4f8cff'; c.beginPath(); c.moveTo(0, -11 * d); c.lineTo(-7 * d, 7 * d); c.lineTo(7 * d, 7 * d); c.closePath(); c.fill(); c.restore();
+  // camera view with floor mask and obstacle base
+  const cc = $('exCam'), dd = sizeCanvas(cc), k2 = cc.getContext('2d');
+  if (EX.frame) { const { AW, AH } = EX, oc = exDraw.oc || (exDraw.oc = document.createElement('canvas')); oc.width = AW; oc.height = AH; const ox = oc.getContext('2d'), id = ox.createImageData(AW, AH);
+    for (let p = 0; p < AW * AH; p++) { let r = EX.frame[p * 3], g = EX.frame[p * 3 + 1], b = EX.frame[p * 3 + 2]; if (EX.scan && EX.scan.mask[p]) { r = 0.7 * r; g = 0.7 * g + 0.3; b = 0.7 * b; } id.data[p * 4] = r * 255; id.data[p * 4 + 1] = g * 255; id.data[p * 4 + 2] = b * 255; id.data[p * 4 + 3] = 255; }
+    ox.putImageData(id, 0, 0); k2.imageSmoothingEnabled = false; k2.drawImage(oc, 0, 0, cc.width, cc.height); const sx = cc.width / AW, sy = cc.height / AH;
+    if (EX.scan) { k2.fillStyle = '#ff3b3b'; EX.scan.cols.forEach((q, x) => { if (q.hit && q.y >= 0) k2.fillRect(x * sx, q.y * sy, sx, 2 * dd); }); k2.strokeStyle = 'rgba(255,255,255,.6)'; k2.beginPath(); k2.moveTo(0, EX.scan.yh * sy); k2.lineTo(cc.width, EX.scan.yh * sy); k2.stroke(); } }
+  // arrow + text
+  const ac = $('exArrow'), ax = ac.getContext('2d'); ax.clearRect(0, 0, 220, 220); const D = EX.dirs;
+  if (D) { ax.save(); ax.translate(110, 110);
+    if (D.arrived) { ax.strokeStyle = '#2fbf71'; ax.lineWidth = 16; ax.beginPath(); ax.moveTo(-45, 0); ax.lineTo(-10, 38); ax.lineTo(50, -40); ax.stroke(); }
+    else if (D.stop) { ax.fillStyle = D.key === 'hold' ? '#8a96b3' : '#ff5a5f'; ax.beginPath(); for (let i = 0; i < 8; i++) { const a = Math.PI / 8 + i * Math.PI / 4; ax.lineTo(70 * Math.cos(a), 70 * Math.sin(a)); } ax.fill(); ax.fillStyle = '#fff'; ax.font = 'bold 34px system-ui'; ax.textAlign = 'center'; ax.fillText(D.key === 'hold' ? '…' : 'STOP', 0, 12); }
+    else { ax.rotate(-D.turn); ax.fillStyle = Math.abs(D.turn * R2D) > 25 ? '#ffb020' : '#4f8cff'; ax.beginPath(); ax.moveTo(0, -85); ax.lineTo(55, -20); ax.lineTo(20, -20); ax.lineTo(20, 75); ax.lineTo(-20, 75); ax.lineTo(-20, -20); ax.lineTo(-55, -20); ax.closePath(); ax.fill(); }
+    ax.restore(); $('exInstr').textContent = D.text; $('exSub').textContent = D.sub; }
+  const nOcc = EX.lo.reduce((a, v) => a + (v > 0.7 ? 1 : 0), 0), mv = EX.tracks.filter(T => T.moving);
+  $('exStats').textContent = 'steps ' + EX.pdr.steps + ' · ' + EX.dist.toFixed(1) + ' m walked\nheading ' + (EX.pose.psi * R2D).toFixed(0) + '° · camera ' + ((EX.dep0 || 0) * R2D).toFixed(0) + '° below horizon\nnearest ahead ' + (EX.rf != null && EX.rf < 9 ? EX.rf.toFixed(2) + ' m' : '–') + ' · TTC ' + (isFinite(EX.ttc) ? EX.ttc.toFixed(1) + ' s' : '–') +
+    '\nmap: ' + nOcc + ' obstacle cells (10 cm)\nmoving obstacles: ' + mv.length + (mv.length ? ' (' + mv.map(T => Math.hypot(T.vx, T.vy).toFixed(1) + ' m/s').join(', ') + ')' : '') + '\ncollisions: ' + EX.collisions.length + (EX.src === 'sim' && EX.world ? ' detected / ' + (EX.world.collided || 0) + ' true' : '');
+}
+// ---------- controls ----------
+document.querySelectorAll('[data-xsrc]').forEach(b => b.onclick = () => { EX.src = b.dataset.xsrc; EX.on = false; $('exStepL').value = EX.src === 'sim' ? 0.5 : 0.65; document.querySelectorAll('[data-xsrc]').forEach(x => x.classList.toggle('on', x === b)); EX.goal = null; EX.lo = null;
+  $('exHint').textContent = EX.src === 'sim' ? 'Simulated room: static boxes and two people walking across. A virtual person carries the phone and follows the app; everything it knows comes from the camera image and the simulated motion sensors. Tap the map to set a goal.'
+    : 'Live: hold the phone upright at chest height in portrait, back camera forward and tilted about 20° down, so the floor 1 to 4 m ahead fills the lower half. Stand still facing clear floor, tap Start (it learns the floor and the gyro bias for 1 s), tap the map to set a goal, then walk normally and follow the arrow and voice. Works best on a plain floor that differs in colour from the obstacles.'; });
+$('exStart').onclick = async () => {
+  exSeed = 7; exReset();
+  if (EX.src === 'sim') { exWorldInit(); EX.world.truth = { x: EX.world.start[0], y: EX.world.start[1], psi: 0 }; }
+  else {
+    try { if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') await DeviceMotionEvent.requestPermission(); } catch (e) {}
+    try { if (!(camStream && camStream.active)) { camStream = await getCam(); vid.srcObject = camStream; await vid.play(); } } catch (e) { $('exMsg').textContent = 'Camera blocked (' + e.name + '). Open the GitHub Pages link in Chrome on the phone.'; return; }
+    EX.wantLearn = true; EX.live0 = performance.now(); if (!EX.goal) EX.goal = [0, 3];
+  }
+  EX.on = true; $('exMsg').textContent = '';
+  try { speechSynthesis.cancel(); if (NV.voice) speechSynthesis.speak(new SpeechSynthesisUtterance('Hold still')); } catch (e) {} NV.saidGo = false; NV.lastSpoken = ''; NV.lastSpeakT = performance.now();
+};
+$('exStop').onclick = () => { EX.on = false; };
+$('exLearn').onclick = () => { if (EX.src === 'live') EX.wantLearn = true; else if (EX.frame) exLearnFloor(EX.frame); $('exMsg').textContent = 'Floor colour learned from the bottom of the image.'; };
+$('exClear').onclick = () => { if (EX.lo) { EX.lo.fill(0); EX.seen.fill(0); EX.tracks = []; } };
+$('exTruth').onclick = () => { EX.showTruth = !EX.showTruth; $('exTruth').classList.toggle('on', EX.showTruth); };
+$('exTruth').classList.toggle('on', EX.showTruth);
+$('exMap').onclick = e => { if (!EX.view) return; const r = $('exMap').getBoundingClientRect(), v = EX.view, k = $('exMap').width / r.width;
+  EX.goal = [(e.clientX - r.left) * k / v.s + v.cx0 - v.vw / 2, ($('exMap').height - (e.clientY - r.top) * k) / v.s + v.cy0 - v.vh / 2]; EX.route = null; EX.lastPlan = -9; EX.arrived = false; };
+window.addEventListener('devicemotion', e => { if (EX.src !== 'live' || !EX.on) return; const a = e.accelerationIncludingGravity, r = e.rotationRate; if (!a || a.x == null || !r) return;
+  const now = performance.now() / 1000, dt = EX.lastM ? Math.min(0.1, now - EX.lastM) : 0.016; EX.lastM = now; exMotion([a.x, a.y, a.z], [r.beta || 0, r.gamma || 0, r.alpha || 0], dt, (performance.now() - EX.live0) / 1000, EX.compass); });
+window.addEventListener('deviceorientationabsolute', e => { if (e.alpha != null) EX.compass = -e.alpha; });
+let lastX = 0;
 // ---------- main loop ----------
 function updBadge() {
   if (tab === 'vision') vSrc === 'cam' ? setBadge('LIVE camera', 'live') : vSrc === 'photo' ? setBadge('Your photo', 'live') : setBadge('Synthetic track', 'sim');
   else if (tab === 'drone') setBadge((drone.src === 'cam' ? 'LIVE camera' : 'synthetic track') + ' · ' + (imu.live ? 'LIVE IMU' : 'sim IMU'), drone.src === 'cam' && imu.live ? 'live' : 'sim');
   else if (tab === 'results') setBadge('Experiments', '');
+  else if (tab === 'explore') EX.src === 'sim' ? setBadge('Simulated room', 'sim') : setBadge('LIVE camera + motion', 'live');
   else if (tab === 'nav' && NV.mirror) setBadge('Mirroring phone · ' + (NV.src === 'esp' ? 'ESP32' : NV.src === 'espsim' ? 'simulated ESP32' : NV.src === 'cam' ? 'camera' : 'simulation'), 'live');
   else if (tab === 'nav') NV.src === 'sim' ? setBadge('Simulated floor', 'sim') : setBadge('LIVE camera + gyro', 'live');
   else if (tab === 'beacon') BC.src === 'sim' ? setBadge('Simulated ESP32s', 'sim') : setBadge(BC.src === 'csv' ? 'Replaying ESP32 log' : 'LIVE ESP32', 'live');
@@ -2700,6 +3038,7 @@ function loop(now) {
   if (tab === 'nav') { let fresh = false; if (NV.started && !NV.mirror && now - lastN > 66 && !NV.trialBusy) { lastN = now; const dd = NV.src === 'line' ? lineStep() : NV.src === 'sim' ? simStep(1 / 15) : NV.src === 'espsim' ? espSimStep(1 / 15) : NV.src === 'esp' ? (NV.biasDone && NV.gotEsp ? directions() : null) : liveStep(); NV.lastDirs = NV.biasDone ? holdDirs(dd) : null; fresh = true; } navDraw(NV.started ? NV.lastDirs : null, fresh); }
   if (tab === 'beacon') { if (BC.src === 'sim' && now - lastB > 50) { lastB = now; bSimStep(); } bDraw(); }
   if (tab === 'drone' && now - lastD > 66) { lastD = now; droneStep(); }
+  if (tab === 'explore') { if (EX.on && now - lastX > 66) { const dt = EX.src === 'sim' ? 1 / 15 : Math.min(0.2, (now - lastX) / 1000); lastX = now; if (EX.src === 'live') EX.t = (performance.now() - EX.live0) / 1000 - dt; exStep(dt); } exDraw(); }
   if (tab === 'flight' && now - lastF > 50) { lastF = now; flyStep(); if (fly.fast) flyStep(); flyDraw(); }
   requestAnimationFrame(loop);
 }
