@@ -64,7 +64,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 </head>
 <body>
 <header>
-  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-19</small></h1>
+  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-19b</small></h1>
   <span class="badge" id="badge">idle</span>
   <button class="btn" id="linkBtn" style="padding:5px 10px;font-size:12px">📡 Phone → Laptop</button>
 </header>
@@ -485,6 +485,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
       <button class="btn" id="exLearn">Learn floor</button>
       <button class="btn" id="exClear">Clear map</button>
       <button class="btn" id="exTruth">Show truth (sim)</button>
+      <button class="btn" id="exMarker">🎯 Endpoint = blue marker</button>
     </div>
     <div class="row">
       <label class="hint" style="display:flex;align-items:center;gap:6px">Camera height <input id="exH" type="number" min="0.1" max="2.5" step="0.05" value="1.2" style="width:60px"> m</label>
@@ -492,7 +493,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
       <label class="hint" style="display:flex;align-items:center;gap:6px">Step length <input id="exStepL" type="number" min="0.2" max="1.2" step="0.05" value="0.5" style="width:60px"> m</label>
       <label class="hint" style="display:flex;align-items:center;gap:6px">Body radius <input id="exR" type="number" min="0.1" max="0.6" step="0.05" value="0.3" style="width:56px"> m</label>
     </div>
-    <p class="hint" id="exHint">Simulated room: static boxes and two people walking across. A virtual person carries the phone and follows the app; everything it knows comes from the camera image and the simulated motion sensors. Tap the map to set a goal.</p>
+    <p class="hint" id="exHint">Simulated room: static boxes, two people walking across and a blue sheet on the floor. A virtual person carries the phone and follows the app; everything it knows comes from the camera image and the simulated motion sensors. Set the endpoint by tapping the floor in the camera view, by 🎯 blue marker, or on the map.</p>
     <p class="msg" id="exMsg"></p>
   </div>
   <div class="card">
@@ -500,12 +501,13 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
       <canvas id="exArrow" width="220" height="220" style="width:96px;height:96px;background:#0b101a;border-radius:14px;flex:none"></canvas>
       <div><div id="exInstr" style="font-size:22px;font-weight:700">Tap Start</div><div class="hint" id="exSub">–</div></div>
     </div>
+    <canvas id="exCam" style="width:100%;aspect-ratio:4/3;display:block;margin-top:10px;background:#0b101a;border-radius:10px;touch-action:none;cursor:crosshair"></canvas>
+    <div class="hint">camera · <b>tap the floor to set the endpoint</b> (above the horizon line = 4 m that way) · green = floor · red = obstacle base · yellow pin = endpoint · cyan = blue marker</div>
     <canvas id="exMap" style="width:100%;height:380px;display:block;margin-top:10px;background:#0b101a;border-radius:10px;touch-action:none"></canvas>
     <div class="hint" style="margin-top:6px">dark = unknown · blue = seen free · white = obstacle (static) · orange = moving obstacle + 2 s prediction · yellow = route · blue line = walked · red × = collision</div>
   </div>
   <div class="card">
     <div class="cols" style="display:grid;gap:10px">
-      <div><canvas id="exCam" style="width:100%;aspect-ratio:4/3;display:block;background:#0b101a;border-radius:10px"></canvas><div class="hint">camera · green = floor · red = obstacle base · line = horizon</div></div>
       <div class="hint" id="exStats" style="font:12px/1.6 ui-monospace,monospace;white-space:pre">–</div>
     </div>
   </div>
@@ -2750,8 +2752,9 @@ function exWorldInit() {
   box(-0.2, -0.2, 8.2, 0, 2.5, [0.68, 0.74, 0.86]); box(-0.2, 6, 8.2, 6.2, 2.5, [0.68, 0.74, 0.86]); box(-0.2, 0, 0, 6, 2.5, [0.68, 0.74, 0.86]); box(8, 0, 8.2, 6, 2.5, [0.68, 0.74, 0.86]);
   box(2.4, 2.0, 3.4, 2.8, 0.8, [0.48, 0.31, 0.17]); box(4.6, 0.0, 5.2, 2.6, 1.0, [0.2, 0.32, 0.62]); box(5.6, 3.8, 6.6, 4.6, 0.9, [0.48, 0.31, 0.17]); box(1.2, 4.2, 2.0, 5.0, 0.7, [0.25, 0.5, 0.45]);
   W.people.push({ a: [3.8, 0.6], b: [3.8, 5.4], s: 0.55, u: 0.1, r: 0.25, col: [0.78, 0.18, 0.2] }, { a: [6.0, 1.2], b: [7.6, 1.2], s: 0.45, u: 0.6, r: 0.25, col: [0.2, 0.62, 0.3] });
+  W.marker = { x: 7.0, y: 5.0, r: 0.3 };              // flat blue sheet on the floor (only drawn, never an obstacle)
   W.truth = { x: W.start[0], y: W.start[1], psi: 0, v: 0 }; W.t = 0; W.stepPhase = 0;
-  if (!EX.goal) EX.goal = [7.3 - W.start[0], 5.3 - W.start[1]];        // map frame = start at (0,0), facing up
+  if (!EX.goal && !EX.markerOn && !EX.noDefaultGoal) EX.goal = [7.3 - W.start[0], 5.3 - W.start[1]];        // map frame = start at (0,0), facing up
 }
 function exPeople(t) { return EX.world.people.map(P => { const L = Math.hypot(P.b[0] - P.a[0], P.b[1] - P.a[1]), ph = ((P.u * L + P.s * t) % (2 * L) + 2 * L) % (2 * L), q = ph < L ? ph / L : 2 - ph / L;
   return { x: P.a[0] + q * (P.b[0] - P.a[0]), y: P.a[1] + q * (P.b[1] - P.a[1]), r: P.r, col: P.col, ht: 1.7, vx: (ph < L ? 1 : -1) * P.s * (P.b[0] - P.a[0]) / L, vy: (ph < L ? 1 : -1) * P.s * (P.b[1] - P.a[1]) / L }; }); }
@@ -2770,7 +2773,8 @@ function exRender(pose, dep0, h, vfov, ppl) {        // simulated forward camera
     for (let y = 0; y < AH; y++) {
       const dep = dep0 + Math.atan((y - AH / 2 + 0.5) / fy), i = (y * AW + x) * 3; let c;
       const df = dep > 0.002 ? h / Math.tan(dep) / cosA : 1e9;               // floor distance along this ray
-      if (df < hit.t) { const wx = pose.x + dx * df, wy = pose.y + dy * df, chk = ((Math.floor(wx * 2) + Math.floor(wy * 2)) & 1) ? 1.04 : 0.96; c = [0.76 * chk, 0.68 * chk, 0.54 * chk]; }
+      if (df < hit.t) { const wx = pose.x + dx * df, wy = pose.y + dy * df, chk = ((Math.floor(wx * 2) + Math.floor(wy * 2)) & 1) ? 1.04 : 0.96, M = EX.world.marker;
+        c = M && Math.hypot(wx - M.x, wy - M.y) < M.r ? [0.12, 0.28, 0.85] : [0.76 * chk, 0.68 * chk, 0.54 * chk]; }
       else { const ht = h - hit.t * cosA * Math.tan(dep); if (hit.o && ht >= 0 && ht <= hit.o.ht) { const sh = 1 - 0.05 * hit.t; c = hit.o.col.map(v => v * sh); } else c = [0.55, 0.58, 0.64]; }
       for (let k = 0; k < 3; k++) img[i + k] = Math.max(0, Math.min(1, c[k] + 0.025 * exGauss()));
     } }
@@ -2785,12 +2789,12 @@ function exLearnFloor(img) {                           // bottom 20% of the imag
   EX.floor = { m, s: [Math.max(sd[0], 0.012), Math.max(sd[1], 0.012), Math.max(3 * sd[2], 0.15 * m[2])] };
 }
 const exIsFloor = (f, F) => ((f[0] - F.m[0]) / F.s[0]) ** 2 + ((f[1] - F.m[1]) / F.s[1]) ** 2 + ((f[2] - F.m[2]) / F.s[2]) ** 2 < 9;
-function exScan(img, dep0, h, vfov) {
+function exScan(img, dep0, h, vfov, mk) {
   const { AW, AH } = EX, F = EX.floor, fy = (AH / 2) / Math.tan(vfov / 2), fx = fy, Rmax = 3.5;
   const yh = Math.max(0, Math.ceil(AH / 2 - 0.5 - fy * Math.tan(dep0)));     // first row below the horizon
   const raw = [], mask = new Uint8Array(AW * AH);
   for (let x = 0; x < AW; x++) { let run = 0, yo = -1;
-    for (let y = AH - 1; y >= yh; y--) { const fl = exIsFloor(exFeat(img, (y * AW + x) * 3), F); mask[y * AW + x] = fl ? 1 : 0; if (!fl) { if (++run >= 3) { yo = y + 2; break; } } else run = 0; }
+    for (let y = AH - 1; y >= yh; y--) { const fl = (mk && mk[y * AW + x]) || exIsFloor(exFeat(img, (y * AW + x) * 3), F); mask[y * AW + x] = fl ? 1 : 0; if (!fl) { if (++run >= 3) { yo = y + 2; break; } } else run = 0; }
     const a = Math.atan((x - AW / 2 + 0.5) / fx);
     if (yo >= 0) { const dep = dep0 + Math.atan((yo - AH / 2 + 0.5) / fy), r = dep > 0.01 ? h / Math.tan(dep) / Math.cos(a) : Rmax; raw.push({ a, r: Math.min(r, Rmax), hit: r < Rmax, y: yo }); }
     else raw.push({ a, r: Math.min(Rmax, dep0 + Math.atan((yh - AH / 2 + 0.5) / fy) > 0.01 ? h / Math.tan(dep0 + Math.atan((yh - AH / 2 + 0.5) / fy)) : Rmax), hit: false, y: -1 }); }
@@ -2913,7 +2917,7 @@ function exStep(dt) {
     const W = EX.world, T = W.truth, ppl = exPeople(W.t); W.t += dt;
     // the virtual person follows the app (like a person reading the arrow), walking 0.8 m/s
     const d = EX.dirs; let rate = 0, v = 0;
-    if (EX.t > 1.2 && d && !d.arrived && !d.stop) { rate = Math.max(-80, Math.min(80, d.turn * R2D * 2.2)); if (Math.abs(d.turn * R2D) < 35) v = 0.8; }
+    if (EX.t > 1.2 && d && !d.arrived && !d.stop) { rate = Math.max(-80, Math.min(80, d.turn * R2D * 2.2)); if (Math.abs(d.turn * R2D) < 35 && !d.search) v = 0.8; if (d.search) rate = 35; }
     T.psi = wrapA(T.psi + rate * D2R * dt); const f = fwdV(T.psi), nx = T.x + v * dt * f[0], ny = T.y + v * dt * f[1];
     const clr = (x, y) => Math.min(...W.objs.map(o => Math.hypot(Math.max(o.b[0] - x, 0, x - o.b[2]), Math.max(o.b[1] - y, 0, y - o.b[3]))), ...ppl.map(P => Math.hypot(x - P.x, y - P.y) - P.r));
     const hitObj = clr(nx, ny) < 0.2 && clr(nx, ny) < clr(T.x, T.y);   // body radius 0.2 m; moving away from a contact is allowed
@@ -2937,7 +2941,10 @@ function exStep(dt) {
   }
   EX.frame = img; if (EX.bump) EX.bump = Math.max(0, EX.bump - dt);
   if (!EX.floor || EX.t < 1.0) { EX.dirs = { stop: true, turn: 0, text: 'Hold still…', sub: EX.floor ? 'measuring gyro bias' : 'point the camera at clear floor, then Learn floor', key: 'hold' }; return; }
-  const scan = exScan(img, dep0, h, vfov); EX.scan = scan; EX.dep0 = dep0;
+  EX.dep0 = dep0; const mkr = exFindMarker(img, dep0, h, vfov); EX.mk = mkr;
+  if (mkr && EX.markerOn && EX.goalSrc === 'marker' && EX.goal && Math.hypot(mkr.goal[0] - EX.goal[0], mkr.goal[1] - EX.goal[1]) > 1.5) EX.mk = null;   // a jump: not the marker we are walking to
+  if (EX.mk && EX.markerOn) { EX.goal = EX.goal && EX.goalSrc === 'marker' ? [0.8 * EX.goal[0] + 0.2 * mkr.goal[0], 0.8 * EX.goal[1] + 0.2 * mkr.goal[1]] : mkr.goal; EX.goalSrc = 'marker'; EX.arrived = false; }
+  const scan = exScan(img, dep0, h, vfov, EX.markerOn && EX.mk ? EX.mk.mask : null); EX.scan = scan;   // marker pixels count as floor only in marker mode
   const skip = exTrack(scan, EX.pose, dt); exIntegrate(scan, EX.pose, skip);
   // time to collision from the forward ±12° range (low-passed range and range rate)
   const fw = scan.cols.filter(c => Math.abs(c.a) < 12 * D2R), rmin = Math.min(...fw.map(c => c.hit ? c.r : 9));
@@ -2947,6 +2954,47 @@ function exStep(dt) {
   const w = EX.walked[EX.walked.length - 1]; if (Math.hypot(EX.pose.x - w[0], EX.pose.y - w[1]) > 0.1) EX.walked.push([EX.pose.x, EX.pose.y]);
   if (EX.goal && EX.t - EX.lastPlan > 0.4) { EX.lastPlan = EX.t; EX.route = exPlan(); }
   if (EX.goal) { EX.dirs = exDirections(); EX.arrived = !!EX.dirs.arrived; }
+  else if (!EX.markerOn) EX.dirs = { stop: true, turn: 0, text: 'Set the endpoint', sub: 'tap the floor in the camera view (or the map)', key: 'nogoal', hold: true };
+  if (EX.markerOn && EX.goalSrc !== 'marker') exSearch();
+}
+// marker search: turn a full circle; not found -> walk to the farthest floor seen free (avoiding obstacles, preferring new places), look again
+function exSearch() {
+  const S = EX.search || (EX.search = { turned: 0, lastPsi: EX.pose.psi, tried: [] }), psi = EX.pose.psi;
+  if (EX.goalSrc === 'explore' && EX.goal) { if (!EX.arrived && EX.route) { EX.dirs.sub = 'walking to new floor to look for the blue marker'; S.lastPsi = psi; return; } EX.goal = null; EX.goalSrc = null; EX.arrived = false; S.turned = 0; }
+  S.turned += Math.abs(wrapA(psi - S.lastPsi)); S.lastPsi = psi;
+  if (S.turned < 2 * Math.PI) { EX.dirs = { turn: 0.5, text: 'Turn slowly left', sub: 'looking around for the blue marker (' + Math.round(S.turned * R2D) + '° of 360°)', key: 'search', search: true }; return; }
+  const { NX, G } = EX; let best = null, bs = -1;
+  for (let i = 0; i < EX.lo.length; i += 3) if (EX.seen[i] && EX.lo[i] < -1) { const x = (i % NX - EX.ox + 0.5) * G, y = (((i / NX) | 0) - EX.oy + 0.5) * G, d = Math.hypot(x - EX.pose.x, y - EX.pose.y);
+    if (d > 5 || d < 1) continue; const near = Math.min(9, ...S.tried.map(q => Math.hypot(q[0] - x, q[1] - y))); const sc = d + Math.min(near, 3); if (sc > bs) { bs = sc; best = [x, y]; } }
+  S.turned = 0; if (!best) return;
+  S.tried.push(best); EX.goal = best; EX.goalSrc = 'explore'; EX.route = null; EX.lastPlan = -9;
+}
+// ---------- endpoint from the camera ----------
+// a pixel on the floor -> distance by the same flat-floor geometry as the scan -> a point in the map
+function exPixelToMap(px, py) {
+  const { AW, AH } = EX, h = val('exH'), vfov = val('exFov') * D2R, fy = (AH / 2) / Math.tan(vfov / 2), fx = fy, a = Math.atan((px - AW / 2 + 0.5) / fx);
+  const dep = (EX.dep0 || 0) + Math.atan((py - AH / 2 + 0.5) / fy), d = dep > 0.03 ? Math.min(8, h / Math.tan(dep) / Math.cos(a)) : 4;   // above the horizon: 4 m in that direction
+  const [dx, dy] = fwdV(EX.pose.psi - a); return { p: [EX.pose.x + dx * d, EX.pose.y + dy * d], d, onFloor: dep > 0.03 };
+}
+function exMapToPixel(q) {                              // where a map point appears in the image (for the endpoint pin)
+  const { AW, AH } = EX, h = val('exH'), vfov = val('exFov') * D2R, fy = (AH / 2) / Math.tan(vfov / 2), fx = fy, rx = q[0] - EX.pose.x, ry = q[1] - EX.pose.y, d = Math.hypot(rx, ry);
+  const a = wrapA(EX.pose.psi - Math.atan2(-rx, ry)); if (Math.abs(a) > 1.3 || d < 0.2) return null;
+  const x = AW / 2 - 0.5 + fx * Math.tan(a), dep = Math.atan(h / (d * Math.cos(a))), y = AH / 2 - 0.5 + fy * Math.tan(dep - (EX.dep0 || 0));
+  return x >= 0 && x < AW && y >= 0 && y < AH ? [x, y] : null;
+}
+// blue marker: blue pixels (b > 1.4 r, b > 1.15 g) below the horizon, biggest 4-connected blob; it must be flat: its top and bottom
+// rows map to floor distances less than 1.2 m apart (an upright blue object reaches far above that)
+function exFindMarker(img, dep0, h, vfov) {
+  const { AW, AH } = EX, N = AW * AH, fy = (AH / 2) / Math.tan(vfov / 2), fx = fy, yh = Math.max(0, Math.ceil(AH / 2 - 0.5 - fy * Math.tan(dep0))), bl = new Uint8Array(N);
+  for (let y = yh; y < AH; y++) for (let x = 0; x < AW; x++) { const i = (y * AW + x) * 3, r = img[i], g = img[i + 1], b = img[i + 2]; if (b > 0.3 && b > 1.4 * r && b > 1.15 * g) bl[y * AW + x] = 1; }
+  const lab = new Int32Array(N); let best = 0, bestN = 0, L = 0; const st = [];
+  for (let i = 0; i < N; i++) if (bl[i] && !lab[i]) { L++; let n = 0; st.push(i); lab[i] = L; while (st.length) { const p = st.pop(); n++; const x = p % AW, y = (p / AW) | 0; for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy, q = yy * AW + xx; if (xx >= 0 && yy >= 0 && xx < AW && yy < AH && bl[q] && !lab[q]) { lab[q] = L; st.push(q); } } } if (n > bestN) { bestN = n; best = L; } }
+  if (bestN < 5) return null;                            // ~A4 at 6 m is only a few pixels: accepted, refined as you get closer
+  let sx = 0, sy = 0, top = AH, bot = 0; const mask = new Uint8Array(N); for (let i = 0; i < N; i++) if (lab[i] === best) { const x = i % AW, y = (i / AW) | 0; mask[i] = 1; sx += x; sy += y; if (y < top) top = y; if (y > bot) bot = y; }
+  const dist = y => { const dep = dep0 + Math.atan((y - AH / 2 + 0.5) / fy); return dep > 0.02 ? h / Math.tan(dep) : 99; };
+  if (top <= yh + 1 || bot >= AH - 2 || dist(top) - dist(bot) > 1.2) return null;   // touches the horizon, is cut off at the bottom (can't judge), or stands up: not a flat marker
+  const cx = sx / bestN, cy = sy / bestN, a = Math.atan((cx - AW / 2 + 0.5) / fx), d = dist(cy) / Math.cos(a), [dx, dy] = fwdV(EX.pose.psi - a);
+  return { goal: [EX.pose.x + dx * d, EX.pose.y + dy * d], d, mask, px: [cx, cy] };
 }
 // ---------- drawing ----------
 function exDraw() {
@@ -2977,12 +3025,14 @@ function exDraw() {
   if (EX.frame) { const { AW, AH } = EX, oc = exDraw.oc || (exDraw.oc = document.createElement('canvas')); oc.width = AW; oc.height = AH; const ox = oc.getContext('2d'), id = ox.createImageData(AW, AH);
     for (let p = 0; p < AW * AH; p++) { let r = EX.frame[p * 3], g = EX.frame[p * 3 + 1], b = EX.frame[p * 3 + 2]; if (EX.scan && EX.scan.mask[p]) { r = 0.7 * r; g = 0.7 * g + 0.3; b = 0.7 * b; } id.data[p * 4] = r * 255; id.data[p * 4 + 1] = g * 255; id.data[p * 4 + 2] = b * 255; id.data[p * 4 + 3] = 255; }
     ox.putImageData(id, 0, 0); k2.imageSmoothingEnabled = false; k2.drawImage(oc, 0, 0, cc.width, cc.height); const sx = cc.width / AW, sy = cc.height / AH;
+    if (EX.mk) { k2.fillStyle = 'rgba(63,208,255,.45)'; for (let p = 0; p < AW * AH; p++) if (EX.mk.mask[p]) k2.fillRect((p % AW) * sx, ((p / AW) | 0) * sy, sx + 0.5, sy + 0.5); }
+    if (EX.goal) { const gp = exMapToPixel(EX.goal); if (gp) { const gx = (gp[0] + 0.5) * sx, gy = (gp[1] + 0.5) * sy; k2.fillStyle = '#ffd23f'; k2.strokeStyle = '#0b101a'; k2.lineWidth = 2 * dd; k2.beginPath(); k2.moveTo(gx, gy); k2.lineTo(gx - 9 * dd, gy - 20 * dd); k2.arc(gx, gy - 22 * dd, 9 * dd, Math.PI * 0.85, Math.PI * 2.15); k2.closePath(); k2.fill(); k2.stroke(); } }
     if (EX.scan) { k2.fillStyle = '#ff3b3b'; EX.scan.cols.forEach((q, x) => { if (q.hit && q.y >= 0) k2.fillRect(x * sx, q.y * sy, sx, 2 * dd); }); k2.strokeStyle = 'rgba(255,255,255,.6)'; k2.beginPath(); k2.moveTo(0, EX.scan.yh * sy); k2.lineTo(cc.width, EX.scan.yh * sy); k2.stroke(); } }
   // arrow + text
   const ac = $('exArrow'), ax = ac.getContext('2d'); ax.clearRect(0, 0, 220, 220); const D = EX.dirs;
   if (D) { ax.save(); ax.translate(110, 110);
     if (D.arrived) { ax.strokeStyle = '#2fbf71'; ax.lineWidth = 16; ax.beginPath(); ax.moveTo(-45, 0); ax.lineTo(-10, 38); ax.lineTo(50, -40); ax.stroke(); }
-    else if (D.stop) { ax.fillStyle = D.key === 'hold' ? '#8a96b3' : '#ff5a5f'; ax.beginPath(); for (let i = 0; i < 8; i++) { const a = Math.PI / 8 + i * Math.PI / 4; ax.lineTo(70 * Math.cos(a), 70 * Math.sin(a)); } ax.fill(); ax.fillStyle = '#fff'; ax.font = 'bold 34px system-ui'; ax.textAlign = 'center'; ax.fillText(D.key === 'hold' ? '…' : 'STOP', 0, 12); }
+    else if (D.stop) { ax.fillStyle = D.key === 'hold' || D.hold ? '#8a96b3' : '#ff5a5f'; ax.beginPath(); for (let i = 0; i < 8; i++) { const a = Math.PI / 8 + i * Math.PI / 4; ax.lineTo(70 * Math.cos(a), 70 * Math.sin(a)); } ax.fill(); ax.fillStyle = '#fff'; ax.font = 'bold 34px system-ui'; ax.textAlign = 'center'; ax.fillText(D.key === 'hold' || D.hold ? '…' : 'STOP', 0, 12); }
     else { ax.rotate(-D.turn); ax.fillStyle = Math.abs(D.turn * R2D) > 25 ? '#ffb020' : '#4f8cff'; ax.beginPath(); ax.moveTo(0, -85); ax.lineTo(55, -20); ax.lineTo(20, -20); ax.lineTo(20, 75); ax.lineTo(-20, 75); ax.lineTo(-20, -20); ax.lineTo(-55, -20); ax.closePath(); ax.fill(); }
     ax.restore(); $('exInstr').textContent = D.text; $('exSub').textContent = D.sub; }
   const nOcc = EX.lo.reduce((a, v) => a + (v > 0.7 ? 1 : 0), 0), mv = EX.tracks.filter(T => T.moving);
@@ -2991,15 +3041,15 @@ function exDraw() {
 }
 // ---------- controls ----------
 document.querySelectorAll('[data-xsrc]').forEach(b => b.onclick = () => { EX.src = b.dataset.xsrc; EX.on = false; $('exStepL').value = EX.src === 'sim' ? 0.5 : 0.65; document.querySelectorAll('[data-xsrc]').forEach(x => x.classList.toggle('on', x === b)); EX.goal = null; EX.lo = null;
-  $('exHint').textContent = EX.src === 'sim' ? 'Simulated room: static boxes and two people walking across. A virtual person carries the phone and follows the app; everything it knows comes from the camera image and the simulated motion sensors. Tap the map to set a goal.'
-    : 'Live: hold the phone upright at chest height in portrait, back camera forward and tilted about 20° down, so the floor 1 to 4 m ahead fills the lower half. Stand still facing clear floor, tap Start (it learns the floor and the gyro bias for 1 s), tap the map to set a goal, then walk normally and follow the arrow and voice. Works best on a plain floor that differs in colour from the obstacles.'; });
+  $('exHint').textContent = EX.src === 'sim' ? 'Simulated room: static boxes, two people walking across and a blue sheet on the floor. A virtual person carries the phone and follows the app; everything it knows comes from the camera image and the simulated motion sensors. Set the endpoint by tapping the floor in the camera view, by 🎯 blue marker, or on the map.'
+    : 'Live: hold the phone upright at chest height in portrait, back camera forward and tilted about 20° down, so the floor 1 to 4 m ahead fills the lower half. Stand still facing clear floor and tap Start (it learns the floor and the gyro bias for 1 s). Then set the endpoint: tap the spot on the floor in the camera view, or put a blue sheet on the floor there and tap 🎯 (the app turns you until it sees it). No path or map is needed: walk normally and follow the arrow and voice; obstacles are mapped and avoided as they come into view. Works best on a plain floor that differs in colour from the obstacles.'; });
 $('exStart').onclick = async () => {
   exSeed = 7; exReset();
-  if (EX.src === 'sim') { exWorldInit(); EX.world.truth = { x: EX.world.start[0], y: EX.world.start[1], psi: 0 }; }
+  if (EX.src === 'sim') { if (EX.goalSrc === 'tap') EX.goal = null; exWorldInit(); EX.world.truth = { x: EX.world.start[0], y: EX.world.start[1], psi: 0 }; }
   else {
     try { if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') await DeviceMotionEvent.requestPermission(); } catch (e) {}
     try { if (!(camStream && camStream.active)) { camStream = await getCam(); vid.srcObject = camStream; await vid.play(); } } catch (e) { $('exMsg').textContent = 'Camera blocked (' + e.name + '). Open the GitHub Pages link in Chrome on the phone.'; return; }
-    EX.wantLearn = true; EX.live0 = performance.now(); if (!EX.goal) EX.goal = [0, 3];
+    EX.wantLearn = true; EX.live0 = performance.now(); if (EX.goalSrc !== 'marker') EX.goal = null;
   }
   EX.on = true; $('exMsg').textContent = '';
   try { speechSynthesis.cancel(); if (NV.voice) speechSynthesis.speak(new SpeechSynthesisUtterance('Hold still')); } catch (e) {} NV.saidGo = false; NV.lastSpoken = ''; NV.lastSpeakT = performance.now();
@@ -3009,8 +3059,14 @@ $('exLearn').onclick = () => { if (EX.src === 'live') EX.wantLearn = true; else 
 $('exClear').onclick = () => { if (EX.lo) { EX.lo.fill(0); EX.seen.fill(0); EX.tracks = []; } };
 $('exTruth').onclick = () => { EX.showTruth = !EX.showTruth; $('exTruth').classList.toggle('on', EX.showTruth); };
 $('exTruth').classList.toggle('on', EX.showTruth);
+$('exCam').onclick = e => { if (!EX.frame || !EX.lo) { $('exMsg').textContent = 'Tap Start first, then tap the floor in the camera view.'; return; }
+  const r = $('exCam').getBoundingClientRect(), px = (e.clientX - r.left) / r.width * EX.AW, py = (e.clientY - r.top) / r.height * EX.AH, q = exPixelToMap(px, py);
+  EX.goal = q.p; EX.goalSrc = 'tap'; EX.markerOn = false; $('exMarker').classList.remove('on'); EX.route = null; EX.lastPlan = -9; EX.arrived = false;
+  $('exMsg').textContent = q.onFloor ? 'Endpoint set on the floor ' + q.d.toFixed(1) + ' m ahead. Walk; the route avoids obstacles and is re-planned as new ones appear.' : 'You tapped above the horizon: endpoint set 4 m in that direction.'; };
+$('exMarker').onclick = () => { EX.markerOn = !EX.markerOn; $('exMarker').classList.toggle('on', EX.markerOn); if (EX.markerOn) { if (EX.goalSrc !== 'marker') EX.goal = null; EX.route = null; }
+  $('exMsg').textContent = EX.markerOn ? 'Put a blue sheet (A4 or bigger) flat on the floor at the endpoint. The app turns you until it sees it, then guides you there around obstacles.' : ''; };
 $('exMap').onclick = e => { if (!EX.view) return; const r = $('exMap').getBoundingClientRect(), v = EX.view, k = $('exMap').width / r.width;
-  EX.goal = [(e.clientX - r.left) * k / v.s + v.cx0 - v.vw / 2, ($('exMap').height - (e.clientY - r.top) * k) / v.s + v.cy0 - v.vh / 2]; EX.route = null; EX.lastPlan = -9; EX.arrived = false; };
+  EX.goal = [(e.clientX - r.left) * k / v.s + v.cx0 - v.vw / 2, ($('exMap').height - (e.clientY - r.top) * k) / v.s + v.cy0 - v.vh / 2]; EX.goalSrc = 'map'; EX.markerOn = false; $('exMarker').classList.remove('on'); EX.route = null; EX.lastPlan = -9; EX.arrived = false; };
 window.addEventListener('devicemotion', e => { if (EX.src !== 'live' || !EX.on) return; const a = e.accelerationIncludingGravity, r = e.rotationRate; if (!a || a.x == null || !r) return;
   const now = performance.now() / 1000, dt = EX.lastM ? Math.min(0.1, now - EX.lastM) : 0.016; EX.lastM = now; exMotion([a.x, a.y, a.z], [r.beta || 0, r.gamma || 0, r.alpha || 0], dt, (performance.now() - EX.live0) / 1000, EX.compass); });
 window.addEventListener('deviceorientationabsolute', e => { if (e.alpha != null) EX.compass = -e.alpha; });
