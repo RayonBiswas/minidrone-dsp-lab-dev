@@ -130,3 +130,9 @@
 - Red is only used if it is saturated red (r > 2 g, r > 1.8 b, r - g > 70), inside the maze box and its traced length > 0.6 × maze side; otherwise `mzSolve()`.
 - `mzSolve()`: each outer wall fitted as its own line (perspective), gaps = stretches without wall pixels within a band, at least 1.2 × the 90th-percentile wall distance (~ a corridor wide); the two longest, start = nearer top-left. Free space = inside the four lines, walls thickened 1 px. Dijkstra with 4-neighbour moves, cost 1 + 40/d² (d = distance to a wall) so the route runs down corridor middles. Taps on the canvas (S, then E) override the gaps.
 - Tested: user's photo of a maze on a phone screen (slanted, with keyboard, hand, wood) → entrance bottom-left, exit right, 0 wall crossings; maze_no_path.png → same turns as the red solution.
+
+## Maze shortest path (2026-11-18c)
+- Default flow: photo → mzProcess (maze + walls) → mzSolve (shortest path) → mzAnimate (red line grows over 1.6 s, then S and E pins). Red tracing only with `#mzUseRed`.
+- Walls: darker than 0.72 × local mean, not reddish (r > g+25 and b+25 never a wall), and ≥ 60% paper in a (4·rad+1)² window counting off-photo as not paper (excludes the paper edge, keeps wall junctions). Box per side: long-line profile unless it disagrees with the wall extent (0.3/99.7 pct) by > 4%.
+- Solver: wall holes closed (box filter, ~1.2% of side), Dijkstra over (pixel, heading), step 1 + 40/d², turn penalty max(3, 3% of side) → fewest turns among near-equal routes.
+- Verified with 4 generated mazes (perfect and with loops) + photo-like copies (rotation ±8°, keystone, uneven light, blur, noise, brown table): turn counts equal the true BFS shortest path (corner entrance can add 1); 0 crossings of dark pixels.
