@@ -121,3 +121,8 @@
 - Source `line`: `lineStep()` runs `pipeline()` on each camera frame (Camera tab colour `vCol`, `vThr`, ROI chip; median + thin close + biggest blob always on). Steering angle `sa = th + atan(d / 60 px)` (+ = right), low-passed 0.6/0.4, classes with hysteresis: straight < 14/8°, slight, turn > 40/32°.
 - No track for 600 ms -> "Track lost"; blue pad in 6 of 8 frames -> "Landing pad: stop" (arrived). `lineView()` draws the frame + detected line in place of the map; the laptop mirror draws the phone's estimate over its copy of the phone's video.
 - Tested with a canvas-stream fake camera: straight, slight/turn right and left, offset, lost, pad all give the right instruction; voice matches the screen.
+
+## Maze red path (Navigate, `#mzCard`)
+- `mzLoad()` scales the photo to ≤480 px; `mzProcess()`: red = r > 0.3 and r > 1.5 g, b; close 3×3; largest 8-connected blob; Zhang-Suen; longest path by two BFS (ignores spurs); start = end nearer the top-left (Swap button). Tilt = average of 4θ over the path (corridors repeat every 90°); `MZ.toM/toP` rotate between photo and maze axes.
+- `mzCorners()`: Douglas-Peucker (eps 1.2% of size); Square corners squares legs within 20° of the maze axes and drops straight corners (2 passes). Scale = typed width / wall box (dark pixels, 1st-99th percentile in maze axes).
+- CSV like the route export (`drone_route_maze.csv`, 3 comment lines + header). Tested: `test_images/maze_red_path.png` → 30 points, 28 turns, 4.42 m at 1.5 m; a 6° rotated, blurred, noisy, unevenly lit copy → same 28 turns, 4.32 m.
