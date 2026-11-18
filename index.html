@@ -64,7 +64,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 </head>
 <body>
 <header>
-  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-18</small></h1>
+  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-18b</small></h1>
   <span class="badge" id="badge">idle</span>
   <button class="btn" id="linkBtn" style="padding:5px 10px;font-size:12px">📡 Phone → Laptop</button>
 </header>
@@ -387,7 +387,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
   </div>
   <div class="card" id="mzCard">
     <h3>Maze: read the red path</h3>
-    <p class="hint" style="margin-top:0">Photograph the whole maze from straight above (fill the frame, no tilt). The app finds the red solution line, traces it from one end dot to the other, keeps only its corners and scales it with the maze's outer walls. "Path → CSV" saves it for the drone (<code>matlab/route_to_waypoints.m</code>).</p>
+    <p class="hint" style="margin-top:0">Photograph the whole maze from straight above. The app finds the maze in the photo; if a red solution line is drawn inside it, it traces that line exactly, otherwise it solves the maze itself (entrance and exit = the gaps in the outer wall, route down the middle of the corridors). Wrong ends? Tap S, then E on the picture. Corners are squared along the walls and the outer walls set the scale. "Path → CSV" saves it for the drone (<code>matlab/route_to_waypoints.m</code>).</p>
     <div class="row">
       <button class="btn pri" id="mzPhoto">Photo of maze</button><input type="file" id="mzIn" accept="image/*" capture="environment" hidden>
       <button class="btn" id="mzSnap">Snapshot from camera</button>
@@ -2432,33 +2432,80 @@ function lineView(c, cv) {                             // camera frame + detecte
 // red mask -> close -> biggest red blob -> Zhang-Suen thinning -> longest path through the skeleton
 // (two breadth-first searches, so spurs from the end dots are ignored) -> Douglas-Peucker corners.
 // Scale: the maze's outer walls (dark pixels, 1st-99th percentile box) = the width typed in.
-const MZ = { img: null, w: 0, h: 0, path: null, corners: null, box: null, flip: false };
+const MZ = { taps: [], img: null, w: 0, h: 0, path: null, corners: null, box: null, flip: false };
 function mzLoad(src, sw, sh) {
   const k = Math.min(1, 480 / Math.max(sw, sh)), w = Math.max(20, Math.round(sw * k)), h = Math.max(20, Math.round(sh * k));
   const tc = document.createElement('canvas'); tc.width = w; tc.height = h; const tx = tc.getContext('2d'); tx.drawImage(src, 0, 0, w, h);
-  MZ.img = tx.getImageData(0, 0, w, h); MZ.w = w; MZ.h = h; MZ.flip = false; mzProcess();
+  MZ.img = tx.getImageData(0, 0, w, h); MZ.w = w; MZ.h = h; MZ.flip = false; MZ.taps = []; mzProcess();
 }
 function mzProcess() {
-  const { w, h } = MZ, D = MZ.img.data, N = w * h;
-  let red = new Uint8Array(N); const dx = [], dy = [];
-  for (let i = 0; i < N; i++) {
-    const r = D[i * 4] / 255, g = D[i * 4 + 1] / 255, b = D[i * 4 + 2] / 255, mx = Math.max(r, g, b);
-    if (r > 0.3 && r > 1.5 * g && r > 1.5 * b) red[i] = 1;
-    else if (mx < 0.35) { dx.push(i % w); dy.push((i / w) | 0); }
+  const { w, h } = MZ, D = MZ.img.data, N = w * h, lum = new Float32Array(N), red = new Uint8Array(N);
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < N; i++) { const r = D[i * 4], g = D[i * 4 + 1], b = D[i * 4 + 2]; lum[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255; hist[Math.min(255, (lum[i] * 255) | 0)]++;
+    if (r > 90 && r > 2 * g && r > 1.8 * b && r - g > 70) red[i] = 1; }               // saturated red only (wood, skin and brown are rejected)
+  // Otsu: dark (walls, background) vs bright (paper / screen)
+  let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let wB = 0, sB = 0, best = 0, thr = 128; for (let t = 0; t < 256; t++) { wB += hist[t]; if (!wB || wB === N) continue; sB += t * hist[t];
+    const mB = sB / wB, mF = (sum - sB) / (N - wB), v = wB * (N - wB) * (mB - mF) ** 2; if (v > best) { best = v; thr = t; } }
+  const T = thr / 255, bright = new Uint8Array(N); for (let i = 0; i < N; i++) bright[i] = lum[i] > T ? 1 : 0;
+  // the maze = biggest bright 4-connected region (the paper); its bounding box, a little enlarged, is where we look
+  const comp = (m, conn8) => { const lab = new Int32Array(N); let L = 0, bestL = 0, bestN = 0; const st = [];
+    for (let i = 0; i < N; i++) if (m[i] && !lab[i]) { L++; let n = 0; st.push(i); lab[i] = L;
+      while (st.length) { const p = st.pop(); n++; const x = p % w, y = (p / w) | 0;
+        for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) { if (!conn8 && j && k) continue; const xx = x + k, yy = y + j, q = yy * w + xx; if (xx >= 0 && yy >= 0 && xx < w && yy < h && m[q] && !lab[q]) { lab[q] = L; st.push(q); } } }
+      if (n > bestN) { bestN = n; bestL = L; } }
+    return { lab, bestL, bestN }; };
+  const P0 = comp(bright, false);
+  let rx0 = 0, ry0 = 0, rx1 = w - 1, ry1 = h - 1;
+  if (P0.bestN > 0.04 * N) { rx0 = w; ry0 = h; rx1 = 0; ry1 = 0; for (let i = 0; i < N; i++) if (P0.lab[i] === P0.bestL) { const x = i % w, y = (i / w) | 0; if (x < rx0) rx0 = x; if (x > rx1) rx1 = x; if (y < ry0) ry0 = y; if (y > ry1) ry1 = y; } }
+  const inR = (x, y) => x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1;
+  // walls = dark pixels inside the paper region
+  // walls = pixels clearly darker than their surroundings (local mean), so uneven light does not matter
+  const I = new Float64Array((w + 1) * (h + 1)); for (let y = 0; y < h; y++) { let rs = 0; for (let x = 0; x < w; x++) { rs += lum[y * w + x]; I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + rs; } }
+  const rad = Math.max(6, Math.round(0.03 * Math.max(rx1 - rx0, ry1 - ry0))), mg = Math.max(2, Math.round(0.01 * Math.max(rx1 - rx0, ry1 - ry0)));
+  const big = P0.bestN > 0.04 * N, J = new Float64Array((w + 1) * (h + 1));   // integral image of the paper mask
+  if (big) for (let y = 0; y < h; y++) { let rs = 0; for (let x = 0; x < w; x++) { rs += P0.lab[y * w + x] === P0.bestL ? 1 : 0; J[(y + 1) * (w + 1) + x + 1] = J[y * (w + 1) + x + 1] + rs; } }
+  const wall = new Uint8Array(N), wx = [], wy = [];
+  for (let y = ry0 + mg; y <= ry1 - mg; y++) for (let x = rx0 + mg; x <= rx1 - mg; x++) { const i = y * w + x; if (red[i]) continue;
+    const xa = Math.max(0, x - rad), xb = Math.min(w, x + rad + 1), ya = Math.max(0, y - rad), yb = Math.min(h, y + rad + 1);
+    const mean = (I[yb * (w + 1) + xb] - I[ya * (w + 1) + xb] - I[yb * (w + 1) + xa] + I[ya * (w + 1) + xa]) / ((xb - xa) * (yb - ya));
+    if (!(lum[i] < 0.72 * mean && lum[i] < T + 0.1)) continue;
+    if (big && (J[yb * (w + 1) + xb] - J[ya * (w + 1) + xb] - J[yb * (w + 1) + xa] + J[ya * (w + 1) + xa]) < 0.75 * (xb - xa) * (yb - ya)) continue;   // a wall is surrounded by paper; the paper's own edge is not
+    wall[i] = 1; wx.push(x); wy.push(y); }
+  // maze tilt from the walls: the angle that makes their row and column projections sharpest
+  let bestA = 0, bestS = -1;
+  if (wx.length > 100) for (let a = -45; a < 45; a += 0.5) { const c = Math.cos(a * D2R), sn = Math.sin(a * D2R), hu = new Map(), hv = new Map();
+    for (let i = 0; i < wx.length; i += 2) { const u = Math.round(wx[i] * c + wy[i] * sn), v = Math.round(-wx[i] * sn + wy[i] * c); hu.set(u, (hu.get(u) || 0) + 1); hv.set(v, (hv.get(v) || 0) + 1); }
+    let sc = 0; for (const n of hu.values()) sc += n * n; for (const n of hv.values()) sc += n * n; if (sc > bestS) { bestS = sc; bestA = a; } }
+  MZ.rot = bestA * D2R; const cr = Math.cos(MZ.rot), sr = Math.sin(MZ.rot);
+  MZ.toM = ([x, y]) => [x * cr + y * sr, -x * sr + y * cr]; MZ.toP = ([u, v]) => [u * cr - v * sr, u * sr + v * cr];
+  const pct = (v, q) => { const s2 = v.slice().sort((m, n) => m - n); return s2[Math.min(s2.length - 1, Math.floor(q * s2.length))]; };
+  const du = [], dv = []; for (let i = 0; i < wx.length; i++) { const [u, v] = MZ.toM([wx[i], wy[i]]); du.push(u); dv.push(v); }
+  if (wx.length > 200) {                               // outer walls = outermost rows / columns that hold a long wall line
+    const prof = (a, lo) => { const m = new Map(); for (const v of a) { const k = Math.round(v); m.set(k, (m.get(k) || 0) + 1); } const ks = [...m.keys()].sort((x, y) => x - y);
+      const sm = k => (m.get(k - 1) || 0) + (m.get(k) || 0) + (m.get(k + 1) || 0), mx = Math.max(...ks.map(sm)), hit = ks.filter(k => sm(k) > 0.3 * mx); return [hit[0], hit[hit.length - 1]]; };
+    const [pu0, pu1] = prof(du), [pv0, pv1] = prof(dv);
+    MZ.box = (pu1 - pu0 > 20 && pv1 - pv0 > 20) ? [pu0, pv0, pu1, pv1] : [pct(du, 0.005), pct(dv, 0.005), pct(du, 0.995), pct(dv, 0.995)];
   }
-  const morph = (m, grow) => { const o = new Uint8Array(N); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = grow ? 0 : 1;
-    for (let j = -1; j <= 1 && (grow ? !v : v); j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j; const p = xx >= 0 && yy >= 0 && xx < w && yy < h ? m[yy * w + xx] : 0; if (grow ? p : !p) { v = grow ? 1 : 0; break; } }
-    o[y * w + x] = v; } return o; };
-  red = morph(morph(red, true), false);                                  // close 3x3: bridge 1-px gaps
-  // biggest 8-connected red blob
-  const lab = new Int32Array(N); let best = 0, bestN = 0, L = 0; const st = [];
-  for (let i = 0; i < N; i++) if (red[i] && !lab[i]) { L++; let n = 0; st.push(i); lab[i] = L;
-    while (st.length) { const p = st.pop(); n++; const x = p % w, y = (p / w) | 0;
-      for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) { const xx = x + k, yy = y + j, q = yy * w + xx; if (xx >= 0 && yy >= 0 && xx < w && yy < h && red[q] && !lab[q]) { lab[q] = L; st.push(q); } } }
-    if (n > bestN) { bestN = n; best = L; } }
-  if (bestN < 30) { MZ.path = MZ.corners = null; mzDraw(); $('mzMsg').textContent = 'No red path found. Use a bright red line, good light, and fill the frame with the maze.'; return; }
-  const sk = new Uint8Array(N); for (let i = 0; i < N; i++) sk[i] = lab[i] === best ? 1 : 0;
-  // Zhang-Suen thinning
+  else { const cs = [[rx0, ry0], [rx1, ry0], [rx0, ry1], [rx1, ry1]].map(MZ.toM); MZ.box = [Math.min(...cs.map(c => c[0])), Math.min(...cs.map(c => c[1])), Math.max(...cs.map(c => c[0])), Math.max(...cs.map(c => c[1]))]; }
+  const [u0, v0, u1, v1] = MZ.box, side = Math.max(u1 - u0, v1 - v0);
+  const inBox = (x, y, m) => { const [u, v] = MZ.toM([x, y]); return u >= u0 - m && u <= u1 + m && v >= v0 - m && v <= v1 + m; };
+  MZ.wall = wall; MZ.inBox = inBox; MZ.side = side;
+  // a red solution line inside the maze? keep only red inside the box; it must be long
+  const redIn = new Uint8Array(N); for (let i = 0; i < N; i++) if (red[i] && inBox(i % w, (i / w) | 0, 0.04 * side)) redIn[i] = 1;
+  let rp = null;
+  if (MZ.taps.length < 2) {
+    const closed = mzClose(redIn, w, h), R = comp(closed, true);
+    if (R.bestN > 30) { const sk = new Uint8Array(N); for (let i = 0; i < N; i++) sk[i] = R.lab[i] === R.bestL ? 1 : 0; mzThin(sk, w, h);
+      const pth = mzLongest(sk, w, h); if (pth.length > 0.6 * side) rp = pth; }
+  }
+  if (rp) { let a = rp[0], z = rp[rp.length - 1]; if (a[0] + a[1] > z[0] + z[1]) rp.reverse(); MZ.path = rp; MZ.mode = 'red'; mzCorners(); return; }
+  mzSolve();
+}
+function mzClose(m, w, h) { const N = w * h, g = (src, grow) => { const o = new Uint8Array(N); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = grow ? 0 : 1;
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j, p = xx >= 0 && yy >= 0 && xx < w && yy < h ? src[yy * w + xx] : 0; if (grow && p) v = 1; if (!grow && !p) v = 0; }
+    o[y * w + x] = v; } return o; }; return g(g(m, true), false); }
+function mzThin(sk, w, h) {                            // Zhang-Suen
   const at = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? sk[y * w + x] : 0;
   for (let it = 0, ch = 1; ch && it < 100; it++) { ch = 0;
     for (const pass of [0, 1]) { const del = [];
@@ -2469,27 +2516,70 @@ function mzProcess() {
         if (pass === 0 ? (P[0] * P[2] * P[4] || P[2] * P[4] * P[6]) : (P[0] * P[2] * P[6] || P[0] * P[4] * P[6])) continue;
         del.push(y * w + x); }
       for (const q of del) sk[q] = 0; if (del.length) ch = 1; } }
-  // longest path: BFS from any pixel to the farthest A, then BFS from A to the farthest B
-  const bfs = s0 => { const dist = new Int32Array(N).fill(-1), par = new Int32Array(N).fill(-1), q = [s0]; dist[s0] = 0; let far = s0;
-    for (let h0 = 0; h0 < q.length; h0++) { const p = q[h0], x = p % w, y = (p / w) | 0; if (dist[p] > dist[far]) far = p;
-      for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) { const xx = x + k, yy = y + j, r = yy * w + xx; if ((j || k) && xx >= 0 && yy >= 0 && xx < w && yy < h && sk[r] && dist[r] < 0) { dist[r] = dist[p] + 1; par[r] = p; q.push(r); } } }
+}
+function mzLongest(sk, w, h) {                         // longest path through a skeleton: BFS to the farthest pixel, twice
+  const N = w * h, bfs = s0 => { const dist = new Int32Array(N).fill(-1), par = new Int32Array(N).fill(-1), q = [s0]; dist[s0] = 0; let far = s0;
+    for (let k = 0; k < q.length; k++) { const p = q[k], x = p % w, y = (p / w) | 0; if (dist[p] > dist[far]) far = p;
+      for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j, r = yy * w + xx; if ((i || j) && xx >= 0 && yy >= 0 && xx < w && yy < h && sk[r] && dist[r] < 0) { dist[r] = dist[p] + 1; par[r] = p; q.push(r); } } }
     return { far, par }; };
-  let s0 = sk.indexOf(1); const A = bfs(s0).far, R = bfs(A), path = [];
-  for (let p = R.far; p >= 0; p = R.par[p]) path.push([p % w, (p / w) | 0]);
-  let a = path[0], z = path[path.length - 1]; if (a[0] + a[1] > z[0] + z[1]) path.reverse();   // start = the end nearer the top-left
-  MZ.path = path;
-  // maze tilt from the path itself: corridor directions repeat every 90°, so average 4θ over short pieces
-  let c4 = 0, s4 = 0; for (let i = 6; i < path.length; i += 3) { const ddx = path[i][0] - path[i - 6][0], ddy = path[i][1] - path[i - 6][1], t = Math.atan2(ddy, ddx); c4 += Math.cos(4 * t); s4 += Math.sin(4 * t); }
-  MZ.rot = Math.atan2(s4, c4) / 4;                                      // rad, within ±45°
-  const cr = Math.cos(MZ.rot), sr = Math.sin(MZ.rot);
-  MZ.toM = ([x, y]) => [x * cr + y * sr, -x * sr + y * cr];             // photo px -> maze-aligned px
-  MZ.toP = ([u, v]) => [u * cr - v * sr, u * sr + v * cr];
-  // maze box from the walls, in maze-aligned axes
-  const pct = (v, q) => { const s = v.slice().sort((m, n) => m - n); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
-  const du = [], dv = []; for (let i = 0; i < dx.length; i++) { const [u, v] = MZ.toM([dx[i], dy[i]]); du.push(u); dv.push(v); }
-  if (dx.length > 200) MZ.box = [pct(du, 0.01), pct(dv, 0.01), pct(du, 0.99), pct(dv, 0.99)];
-  else { const cs = [[0, 0], [w, 0], [0, h], [w, h]].map(MZ.toM); MZ.box = [Math.min(...cs.map(c => c[0])), Math.min(...cs.map(c => c[1])), Math.max(...cs.map(c => c[0])), Math.max(...cs.map(c => c[1]))]; }
-  mzCorners();
+  const s0 = sk.indexOf(1); if (s0 < 0) return []; const A = bfs(s0).far, R = bfs(A), out = [];
+  for (let p = R.far; p >= 0; p = R.par[p]) out.push([p % w, (p / w) | 0]); return out;
+}
+// Solve the maze: free space = inside the outer walls and not a wall; entrance and exit = the two biggest gaps in the
+// outer wall (or your two taps); Dijkstra with a cost that grows near walls, so the route runs down the corridor middles.
+function mzSolve() {
+  const { w, h, wall, side } = MZ, N = w * h, [u0, v0, u1, v1] = MZ.box;
+  // outer walls as four separate lines (photos are rarely square-on): per row/column, the outermost wall pixel near
+  // the box edge, then a straight-line fit with outliers removed
+  const wl = []; for (let i = 0; i < N; i++) if (wall[i]) { const [u, v] = MZ.toM([i % w, (i / w) | 0]); wl.push([u, v]); }
+  const near = 0.08 * side, band = Math.max(2, Math.round(0.015 * side));
+  const fitSide = (along, across, pickMin, edge) => {        // along: 0 = u, 1 = v
+    const best = new Map();
+    for (const p of wl) { const a = Math.round(p[along]), c = p[across]; if (Math.abs(c - edge) > near) continue; const b = best.get(a); if (b === undefined || (pickMin ? c < b : c > b)) best.set(a, c); }
+    let pts = [...best.entries()], k = 0, m = edge;
+    for (let it = 0; it < 3 && pts.length > 5; it++) { let sa = 0, sc = 0, saa = 0, sac = 0; for (const [a, c] of pts) { sa += a; sc += c; saa += a * a; sac += a * c; }
+      const n = pts.length, den = n * saa - sa * sa; k = den ? (n * sac - sa * sc) / den : 0; m = (sc - k * sa) / n; pts = pts.filter(([a, c]) => Math.abs(c - (k * a + m)) < 3); }
+    return a => k * a + m; };
+  const L = { left: fitSide(1, 0, true, u0), right: fitSide(1, 0, false, u1), top: fitSide(0, 1, true, v0), bottom: fitSide(0, 1, false, v1) };
+  MZ.inQuad = (x, y, m) => { const [u, v] = MZ.toM([x, y]); return u >= L.left(v) - m && u <= L.right(v) + m && v >= L.top(u) - m && v <= L.bottom(u) + m; };
+  // thicken walls by 1 px so blur gaps do not leak; free = inside the outer walls and not a wall
+  const W2 = new Uint8Array(N); for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { let v = 0; for (let j = -1; j <= 1 && !v; j++) for (let i = -1; i <= 1; i++) if (wall[(y + j) * w + x + i]) { v = 1; break; } W2[y * w + x] = v; }
+  const free = new Uint8Array(N); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (!W2[y * w + x] && MZ.inQuad(x, y, -1)) free[y * w + x] = 1;
+  const dist = new Int32Array(N).fill(-1), q = []; for (let i = 0; i < N; i++) if (!free[i]) { dist[i] = 0; q.push(i); }
+  for (let k = 0; k < q.length; k++) { const p = q[k], x = p % w, y = (p / w) | 0; for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j, r = yy * w + xx; if (xx >= 0 && yy >= 0 && xx < w && yy < h && dist[r] < 0) { dist[r] = dist[p] + 1; q.push(r); } } }
+  let S, E;
+  const snap = ([x, y]) => { let best = -1, bd = 1e9; const R = Math.round(0.06 * side); for (let j = -R; j <= R; j++) for (let i = -R; i <= R; i++) { const xx = Math.round(x + i), yy = Math.round(y + j), r = yy * w + xx; if (xx >= 0 && yy >= 0 && xx < w && yy < h && free[r]) { const d = i * i + j * j - 4 * dist[r]; if (d < bd) { bd = d; best = r; } } } return best; };
+  if (MZ.taps.length >= 2) { S = snap(MZ.taps[0]); E = snap(MZ.taps[1]); MZ.mode = 'taps'; }
+  else {
+    // gaps: stretches of an outer-wall line with no wall pixel within the band
+    const occ = { left: new Set(), right: new Set(), top: new Set(), bottom: new Set() };
+    for (const [u, v] of wl) {
+      if (Math.abs(u - L.left(v)) <= band) occ.left.add(Math.round(v)); if (Math.abs(u - L.right(v)) <= band) occ.right.add(Math.round(v));
+      if (Math.abs(v - L.top(u)) <= band) occ.top.add(Math.round(u)); if (Math.abs(v - L.bottom(u)) <= band) occ.bottom.add(Math.round(u)); }
+    const fd = []; for (let i = 0; i < N; i += 3) if (free[i]) fd.push(dist[i]); fd.sort((a, b) => a - b);
+    const halfW = fd.length ? fd[Math.floor(0.9 * fd.length)] : 0.03 * side, minGap = Math.max(4, 1.2 * halfW);   // an opening is about a corridor wide
+    const gaps = [], mk = (nm, a0, a1, toUV, inward) => { const len = a1 - a0, m = Math.round(0.02 * len); let t = Math.round(a0) + m;
+      while (t < a1 - m) { if (occ[nm].has(t) || occ[nm].has(t - 1) || occ[nm].has(t + 1)) { t++; continue; } let e = t; while (e < a1 - m && !(occ[nm].has(e) || occ[nm].has(e - 1) || occ[nm].has(e + 1))) e++;
+        if (e - t >= minGap) { const c = (t + e) / 2, [u, v] = toUV(c); gaps.push({ nm, n: e - t, p: MZ.toP([u + inward[0] * band * 2, v + inward[1] * band * 2]) }); } t = e; } };
+    mk('left', v0, v1, a => [L.left(a), a], [1, 0]); mk('right', v0, v1, a => [L.right(a), a], [-1, 0]);
+    mk('top', u0, u1, a => [a, L.top(a)], [0, 1]); mk('bottom', u0, u1, a => [a, L.bottom(a)], [0, -1]);
+    gaps.sort((a, b) => b.n - a.n); MZ.gaps = gaps;
+    if (gaps.length < 2) { MZ.path = MZ.corners = MZ.cm = null; mzDraw(); $('mzMsg').textContent = 'Found the maze but not its entrance and exit (no clear gaps in the outer wall' + (gaps.length ? ', only one' : '') + '). Tap S, then E on the picture.'; return; }
+    let [g1, g2] = gaps; if (g1.p[0] + g1.p[1] > g2.p[0] + g2.p[1]) [g1, g2] = [g2, g1];       // start = the gap nearer the top-left
+    S = snap(g1.p); E = snap(g2.p); MZ.mode = 'solved'; MZ.gapNames = [g1.nm, g2.nm];
+  }
+  if (S < 0 || E < 0) { MZ.path = MZ.corners = MZ.cm = null; mzDraw(); $('mzMsg').textContent = 'S or E is not in an open corridor. Tap again inside the maze corridors.'; MZ.taps = []; return; }
+  // Dijkstra (binary heap)
+  const cost = new Float64Array(N).fill(Infinity), par = new Int32Array(N).fill(-1), hp = [], hv = [];
+  const push = (i, c) => { hp.push(i); hv.push(c); let k = hp.length - 1; while (k) { const pa = (k - 1) >> 1; if (hv[pa] <= hv[k]) break; [hp[pa], hp[k]] = [hp[k], hp[pa]]; [hv[pa], hv[k]] = [hv[k], hv[pa]]; k = pa; } };
+  const pop = () => { const top = hp[0], tv = hv[0], li = hp.pop(), lv = hv.pop(); if (hp.length) { hp[0] = li; hv[0] = lv; let k = 0; for (;;) { const a = 2 * k + 1, b = a + 1; let m = k; if (a < hp.length && hv[a] < hv[m]) m = a; if (b < hp.length && hv[b] < hv[m]) m = b; if (m === k) break; [hp[m], hp[k]] = [hp[k], hp[m]]; [hv[m], hv[k]] = [hv[k], hv[m]]; k = m; } } return [top, tv]; };
+  cost[S] = 0; push(S, 0);
+  while (hp.length) { const [p, c] = pop(); if (c > cost[p]) continue; if (p === E) break; const x = p % w, y = (p / w) | 0;
+    for (const [i, j] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + i, yy = y + j, r = yy * w + xx; if (xx < 0 || yy < 0 || xx >= w || yy >= h || !free[r]) continue;   // corridor moves only (no diagonal short-cuts)
+      const nc = c + 1 + 40 / (dist[r] * dist[r]); if (nc < cost[r]) { cost[r] = nc; par[r] = p; push(r, nc); } } }
+  if (!isFinite(cost[E])) { MZ.path = MZ.corners = MZ.cm = null; mzDraw(); $('mzMsg').textContent = 'No open route between the entrance and the exit (walls broken or merged in the photo). Retake it sharper, or tap S and E.'; MZ.taps = []; return; }
+  const path = []; for (let p = E; p >= 0; p = par[p]) path.push([p % w, (p / w) | 0]); path.reverse();
+  MZ.path = path; MZ.flip = false; mzCorners();
 }
 function mzCorners() {
   const P = (MZ.flip ? MZ.path.slice().reverse() : MZ.path).map(MZ.toM), eps = Math.max(2, 0.012 * Math.max(MZ.w, MZ.h));
@@ -2516,14 +2606,16 @@ function mzCorners() {
   const legs = []; for (let i = 1; i < MZ.cm.length; i++) legs.push(Math.hypot(MZ.cm[i][0] - MZ.cm[i - 1][0], MZ.cm[i][1] - MZ.cm[i - 1][1]).toFixed(0));
   let plan = legs[0] + ' cm'; for (let i = 0; i < turns.length; i++) plan += ' · ' + turns[i] + '° · ' + legs[i + 1] + ' cm';
   MZ.plan = plan;
-  $('mzMsg').textContent = 'Red path: ' + C.length + ' points (' + (C.length - 2) + ' turns), ' + (len / 100).toFixed(2) + ' m for a ' + val('mzW') + ' m wide maze (tilt ' + (MZ.rot * R2D).toFixed(1) + '° corrected). S = start, E = end. Plan: ' + plan;
+  $('mzMsg').textContent = (MZ.mode === 'red' ? 'Red path traced: ' : MZ.mode === 'taps' ? 'Solved between your S and E: ' : 'No red path drawn, so the maze was solved (entrance ' + MZ.gapNames[0] + ', exit ' + MZ.gapNames[1] + '): ') + C.length + ' points (' + (C.length - 2) + ' turns), ' + (len / 100).toFixed(2) + ' m for a ' + val('mzW') + ' m wide maze (tilt ' + (MZ.rot * R2D).toFixed(1) + '° corrected). S = start, E = end. Plan: ' + plan;
   mzDraw();
 }
 function mzDraw() {
   const cv = $('mzCv'); if (!MZ.img) return; cv.width = MZ.w; cv.height = MZ.h; const c = cv.getContext('2d');
   c.putImageData(MZ.img, 0, 0); c.fillStyle = 'rgba(15,20,32,.45)'; c.fillRect(0, 0, MZ.w, MZ.h);
   if (MZ.box) { const [u0, v0, u1, v1] = MZ.box, q = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]].map(MZ.toP); c.strokeStyle = 'rgba(138,150,179,.8)'; c.setLineDash([5, 4]); c.beginPath(); q.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.closePath(); c.stroke(); c.setLineDash([]); }
-  if (!MZ.corners) return; const C = MZ.corners, f = Math.max(1, MZ.w / 320);
+  const f = Math.max(1, MZ.w / 320);
+  if (MZ.taps.length === 1) { const [x, y] = MZ.taps[0]; c.fillStyle = '#2fbf71'; c.beginPath(); c.arc(x, y, 7 * f, 0, 7); c.fill(); c.fillStyle = '#fff'; c.font = 'bold ' + (11 * f) + 'px system-ui'; c.fillText('S', x + 8 * f, y - 6 * f); }
+  if (!MZ.corners) return; const C = MZ.corners;
   c.strokeStyle = '#2fbf71'; c.lineWidth = 3 * f; c.lineJoin = 'round'; c.beginPath(); C.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
   c.font = 'bold ' + (10 * f) + 'px system-ui';
   C.forEach((p, i) => { const end = i === 0 || i === C.length - 1; c.fillStyle = end ? (i ? '#ff5a5f' : '#2fbf71') : '#ffd23f'; c.beginPath(); c.arc(p[0], p[1], (end ? 6 : 3.5) * f, 0, 7); c.fill();
@@ -2538,6 +2630,12 @@ $('mzSnap').onclick = async () => {
   mzLoad(vid, vid.videoWidth, vid.videoHeight);
 };
 $('mzSwap').onclick = () => { if (!MZ.path) return; MZ.flip = !MZ.flip; mzCorners(); };
+$('mzCv').onclick = e => {                           // tap S, then E: solve between them
+  if (!MZ.img) return; const r = $('mzCv').getBoundingClientRect(), x = (e.clientX - r.left) * MZ.w / r.width, y = (e.clientY - r.top) * MZ.h / r.height;
+  if (MZ.taps.length >= 2) MZ.taps = [];
+  MZ.taps.push([x, y]);
+  if (MZ.taps.length === 1) { mzDraw(); $('mzMsg').textContent = 'S set. Now tap E (the exit).'; } else mzSolve();
+};
 $('mzW').onchange = $('mzSq').onchange = () => { if (MZ.path) mzCorners(); };
 $('mzCsv').onclick = () => {
   if (!MZ.cm) { $('mzMsg').textContent = 'Read a maze first.'; return; }
