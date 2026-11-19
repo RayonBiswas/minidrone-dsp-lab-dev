@@ -64,7 +64,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 </head>
 <body>
 <header>
-  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-19b</small></h1>
+  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-19c</small></h1>
   <span class="badge" id="badge">idle</span>
   <button class="btn" id="linkBtn" style="padding:5px 10px;font-size:12px">📡 Phone → Laptop</button>
 </header>
@@ -2741,7 +2741,7 @@ const fwdV = psi => [-Math.sin(psi), Math.cos(psi)];                   // headin
 function exReset() {
   const N = EX.NX * EX.NY;
   EX.lo = new Float32Array(N); EX.seen = new Uint8Array(N); EX.tracks = []; EX.nextId = 1; EX.collisions = []; EX.walked = [[0, 0]];
-  EX.pose = { x: 0, y: 0, psi: 0 }; EX.pdr = { lastPos: [0, 0], lastT: 0, period: 0.6, steps: 0, lp: 9.81, slow: 9.81, prev: 0, prev2: 0, lastStepT: -9, bias: 0, biasN: 0, biasS: 0, comp0: null, hpLp: 9.81, lastBump: -9 };
+  EX.pose = { x: 0, y: 0, psi: 0 }; EX.vel = 0; EX.dp = null; EX.gridDirty = true; EX.pdr = { lastT: 0, period: 0.6, steps: 0, lp: 9.81, slow: 9.81, prev: 0, prev2: 0, lastStepT: -9, bias: 0, biasN: 0, biasS: 0, comp0: null, hpLp: 9.81, lastBump: -9 };
   EX.route = null; EX.lastPlan = 0; EX.goal = EX.goal || null; EX.t = 0; EX.rf = null; EX.drf = 0; EX.ttc = Infinity; EX.dirs = null; EX.arrived = false; EX.dist = 0;
   EX.up = [0, 0.5, 0.87]; EX.floor = null; EX.scan = null; EX.frame = null;
 }
@@ -2808,14 +2808,17 @@ function exScan(img, dep0, h, vfov, mk) {
 // ---------- occupancy grid ----------
 const exCell = (x, y) => { const gx = Math.floor(x / EX.G) + EX.ox, gy = Math.floor(y / EX.G) + EX.oy; return gx >= 0 && gy >= 0 && gx < EX.NX && gy < EX.NY ? gy * EX.NX + gx : -1; };
 function exIntegrate(scan, pose, skip) {
-  const { NX, G } = EX, x0 = Math.floor(pose.x / G) + EX.ox, y0 = Math.floor(pose.y / G) + EX.oy;
-  for (let k = 0; k < scan.cols.length; k += 2) { const c = scan.cols[k], [hx, hy] = fwdV(pose.psi - c.a), hc = exCell(pose.x + hx * c.r, pose.y + hy * c.r);
-    const sk = skip[k] && !(hc >= 0 && EX.lo[hc] > 1.5), rr = sk ? Math.max(0, c.r - 0.3) : c.r;   // a cell already seen as obstacle several times is never erased by the moving-object logic
-    const [dx, dy] = fwdV(pose.psi - c.a), ex = pose.x + dx * rr, ey = pose.y + dy * rr, x1 = Math.floor(ex / G) + EX.ox, y1 = Math.floor(ey / G) + EX.oy;
+  const { NX, NY, G } = EX, x0 = Math.floor(pose.x / G) + EX.ox, y0 = Math.floor(pose.y / G) + EX.oy;
+  const mark = (x, y, dl, lo, hi) => { if (x >= 0 && y >= 0 && x < NX && y < NY) { const i = y * NX + x; EX.lo[i] = Math.max(lo, Math.min(hi, EX.lo[i] + dl)); EX.seen[i] = 1; } };
+  for (let k = 0; k < scan.cols.length; k++) { const c = scan.cols[k], [dx, dy] = fwdV(pose.psi - c.a), hc = exCell(pose.x + dx * c.r, pose.y + dy * c.r);
+    const sk = skip[k] && !(hc >= 0 && EX.lo[hc] > 1.5);   // a cell already seen as obstacle several times is never erased by the moving-object logic
+    // free space: along the ray up to 15 cm short of an obstacle, so neighbouring rays do not erase its edge (-0.4 each, floor -2 so a new obstacle shows in ~3 frames)
+    const rf = c.hit ? Math.max(0, c.r - (sk ? 0.3 : 0.15)) : c.r, x1 = Math.floor((pose.x + dx * rf) / G) + EX.ox, y1 = Math.floor((pose.y + dy * rf) / G) + EX.oy;
     let x = x0, y = y0; const sx = x1 > x0 ? 1 : -1, sy = y1 > y0 ? 1 : -1, ddx = Math.abs(x1 - x0), ddy = Math.abs(y1 - y0); let err = ddx - ddy;
-    for (let n = 0; n < 200; n++) { if (x === x1 && y === y1) break; if (x >= 0 && y >= 0 && x < NX && y < EX.NY) { const i = y * NX + x; EX.lo[i] = Math.max(-4, EX.lo[i] - 0.4); EX.seen[i] = 1; }
-      const e2 = 2 * err; if (e2 > -ddy) { err -= ddy; x += sx; } if (e2 < ddx) { err += ddx; y += sy; } }
-    if (c.hit && !sk && x1 >= 0 && y1 >= 0 && x1 < NX && y1 < EX.NY) { const i = y1 * NX + x1; EX.lo[i] = Math.min(4, EX.lo[i] + 0.9); EX.seen[i] = 1; } }
+    for (let n = 0; n < 200; n++) { mark(x, y, -0.4, -2, 4); if (x === x1 && y === y1) break; const e2 = 2 * err; if (e2 > -ddy) { err -= ddy; x += sx; } if (e2 < ddx) { err += ddx; y += sy; } }
+    // obstacle: the cell at the range and the one 10 cm behind it (+0.9 each), so a wall reads as a solid line
+    if (c.hit && !sk) for (const rr of [c.r, c.r + 0.1]) mark(Math.floor((pose.x + dx * rr) / G) + EX.ox, Math.floor((pose.y + dy * rr) / G) + EX.oy, 0.9, -2, 4); }
+  EX.gridDirty = true;
 }
 // ---------- tracking: compact segments -> constant-velocity Kalman filters ----------
 function exTrack(scan, pose, dt) {
@@ -2887,27 +2890,35 @@ function exDirections() {
 // ---------- motion sensors: steps, heading, bump (same code for the simulated and the real phone) ----------
 function exMotion(aig, rate, dt, t, compassDeg) {     // aig: accel incl. gravity (m/s^2, device axes); rate: [beta, gamma, alpha] deg/s
   const D = EX.pdr, am = Math.hypot(aig[0], aig[1], aig[2]);
-  const k = Math.min(1, dt / 0.25); EX.up = EX.up.map((u, i) => u + k * (aig[i] / Math.max(am, 1e-3) - u)); const un = Math.hypot(...EX.up); EX.up = EX.up.map(u => u / un);
+  // orientation: the "up" vector is carried along by the gyro (du/dt = -w x u) and pulled gently toward measured gravity,
+  // mostly when |a| is close to g (footstep jolts barely move it): a complementary filter on a vector -> steady camera pitch
+  const w = rate.map(v => v * D2R), u = EX.up;
+  let nu = [u[0] - (w[1] * u[2] - w[2] * u[1]) * dt, u[1] - (w[2] * u[0] - w[0] * u[2]) * dt, u[2] - (w[0] * u[1] - w[1] * u[0]) * dt];
+  const ka = Math.abs(am - 9.81) < 1.2 ? Math.min(1, dt / 0.6) : Math.min(1, dt / 4);
+  if (am > 1e-3) nu = nu.map((v, i) => v + ka * (aig[i] / am - v));
+  const un = Math.hypot(...nu); EX.up = nu.map(v => v / un);
   const yaw = rate[0] * EX.up[0] + rate[1] * EX.up[1] + rate[2] * EX.up[2];   // rotation about gravity = turning (deg/s)
   if (t < 1.0) { D.biasS += yaw; D.biasN++; D.bias = D.biasS / D.biasN; return; }   // hold still for 1 s: gyro bias
   EX.pose.psi = wrapA(EX.pose.psi + (yaw - D.bias) * D2R * dt);
-  if (compassDeg != null) { if (D.comp0 == null) D.comp0 = compassDeg - EX.pose.psi * R2D; EX.pose.psi = wrapA(EX.pose.psi + 0.01 * wrapA((compassDeg - D.comp0) * D2R - EX.pose.psi)); }
-  // steps: band-pass |a| (low-pass 3 Hz minus a 0.3 Hz mean), a peak above +1.0 m/s^2, at least 0.3 s apart
+  // compass: only a slow correction of gyro drift; readings far from the gyro heading (magnetic disturbance, phone held upright) are ignored
+  if (compassDeg != null) { if (D.comp0 == null) D.comp0 = compassDeg - EX.pose.psi * R2D;
+    const inn = wrapA((compassDeg - D.comp0) * D2R - EX.pose.psi); if (Math.abs(inn) < 25 * D2R && Math.abs(yaw - D.bias) < 30) EX.pose.psi = wrapA(EX.pose.psi + Math.min(1, dt / 8) * inn); }
+  // steps: band-pass |a| (low-pass 3 Hz minus a 0.3 Hz mean); a step is a 1-5 m/s^2 peak at least 0.3 s after the last one (a bump is bigger)
   D.lp += Math.min(1, dt * 2 * Math.PI * 3) * (am - D.lp); D.slow += Math.min(1, dt * 2 * Math.PI * 0.3) * (am - D.slow); const bp = D.lp - D.slow;
-  // a step is a 1-5 m/s^2 peak; a bump is bigger and is not a step
-  if (D.prev > D.prev2 && D.prev > bp && D.prev > 1.0 && D.prev < 5.0 && t - D.lastBump > 0.6 && t - D.lastStepT > 0.3) { const L = val('exStepL'), f = fwdV(EX.pose.psi);
-    D.period = Math.min(1.2, Math.max(0.3, t - D.lastStepT)); D.lastStepT = t; D.steps++; D.lastPos = [D.lastPos[0] + L * f[0], D.lastPos[1] + L * f[1]]; EX.dist += L; }
+  if (D.prev > D.prev2 && D.prev > bp && D.prev > 1.0 && D.prev < 5.0 && t - D.lastBump > 0.6 && t - D.lastStepT > 0.3) {
+    const gap = t - D.lastStepT; if (gap < 1.2) D.period = 0.7 * D.period + 0.3 * gap;   // cadence, smoothed; a long pause keeps the old cadence
+    D.lastStepT = t; D.steps++; }
   D.prev2 = D.prev; D.prev = bp;
-  // bump: |a| minus its 0.5 Hz mean above 7 m/s^2 (walking stays well below)
+  // bump: |a| minus its 0.5 Hz mean above 7 m/s^2 (walking stays well below); it also stops the walking speed until a new step
   D.hpLp += Math.min(1, dt * 2 * Math.PI * 0.5) * (am - D.hpLp);
-  if (Math.abs(am - D.hpLp) > 7 && t - D.lastBump > 1.0) { D.lastBump = t; EX.bump = 1.2; const f = fwdV(EX.pose.psi), cx = EX.pose.x + 0.35 * f[0], cy = EX.pose.y + 0.35 * f[1]; EX.collisions.push([cx, cy]);
+  if (Math.abs(am - D.hpLp) > 7 && t - D.lastBump > 1.0) { D.lastBump = t; EX.bump = 1.2; EX.vel = 0; D.lastStepT = t - 10; const f = fwdV(EX.pose.psi), cx = EX.pose.x + 0.35 * f[0], cy = EX.pose.y + 0.35 * f[1]; EX.collisions.push([cx, cy]);
     // a bump means "something is right in front of me": block an arc 0.3-0.6 m ahead, +-50 deg, so the next route turns away
     for (let a = -50; a <= 50; a += 10) for (let r = 0.3; r <= 0.61; r += 0.1) { const [dx, dy] = fwdV(EX.pose.psi + a * D2R), c = exCell(EX.pose.x + r * dx, EX.pose.y + r * dy); if (c >= 0) { EX.lo[c] = 4; EX.seen[c] = 1; } } EX.lastPlan = -9; }
-  // continuous position between steps (walking pace), snapped to the step positions
-  // between steps: predict along the stride; if no step comes, hold the last confirmed step
-  // the |a| peak comes mid-stride: centre the prediction on it
-  const walking = t - D.lastStepT < 1.5 * D.period, fr = walking ? Math.min(1, (t - D.lastStepT) / D.period) - 0.5 : 0, f2 = fwdV(EX.pose.psi), L = val('exStepL');
-  EX.pose.x = D.lastPos[0] + fr * L * f2[0]; EX.pose.y = D.lastPos[1] + fr * L * f2[1];
+  // position: walking speed = step length / cadence, low-passed (0.25 s), integrated every sample along the CURRENT heading.
+  // No snapping to step positions (no jumps, no half-step lag); speed falls to 0 within ~0.3 s once the steps stop.
+  const walking = t - D.lastStepT < 1.3 * D.period && D.steps > 0, vT = walking ? val('exStepL') / D.period : 0;
+  EX.vel = (EX.vel || 0) + Math.min(1, dt / (walking ? 0.25 : 0.12)) * (vT - (EX.vel || 0));
+  const f2 = fwdV(EX.pose.psi); EX.pose.x += EX.vel * dt * f2[0]; EX.pose.y += EX.vel * dt * f2[1]; EX.dist += EX.vel * dt;
 }
 // ---------- one step of the pipeline ----------
 function exStep(dt) {
@@ -3000,26 +3011,34 @@ function exFindMarker(img, dep0, h, vfov) {
 function exDraw() {
   const cv = $('exMap'), d = sizeCanvas(cv), c = cv.getContext('2d'), { NX, NY, G } = EX; c.clearRect(0, 0, cv.width, cv.height);
   if (!EX.lo) { c.fillStyle = '#8a96b3'; c.font = (12 * d) + 'px system-ui'; c.fillText('Tap Start', 12 * d, 24 * d); return; }
-  // view: 9 x 7 m around the start (sim room) or around the person
-  const ar = cv.height / cv.width, vw = EX.src === 'sim' ? Math.max(8.6, 6.6 / ar) : 9, vh = vw * ar, cx0 = EX.src === 'sim' ? 3.0 : EX.pose.x, cy0 = EX.src === 'sim' ? 2.1 : EX.pose.y, s = cv.width / vw;
+  // display pose: eased toward the estimate every screen frame (the estimate itself updates 15x a second), so the arrow glides
+  const P = EX.pose; if (!EX.dp) EX.dp = { x: P.x, y: P.y, psi: P.psi };
+  const dp = EX.dp; dp.x += 0.35 * (P.x - dp.x); dp.y += 0.35 * (P.y - dp.y); dp.psi = wrapA(dp.psi + 0.35 * wrapA(P.psi - dp.psi));
+  // view: the sim room, or 9 m around the person, following smoothly
+  const ar = cv.height / cv.width, vw = EX.src === 'sim' ? Math.max(8.6, 6.6 / ar) : 9, vh = vw * ar;
+  if (EX.src === 'sim') EX.cam = { x: 3.0, y: 2.1 }; else { if (!EX.cam) EX.cam = { x: dp.x, y: dp.y }; EX.cam.x += 0.08 * (dp.x - EX.cam.x); EX.cam.y += 0.08 * (dp.y - EX.cam.y); }
+  const cx0 = EX.cam.x, cy0 = EX.cam.y, s = cv.width / vw;
   const X = x => (x - cx0 + vw / 2) * s, Y = y => cv.height - (y - cy0 + vh / 2) * s; EX.view = { cx0, cy0, vw, vh, s };
-  const im = c.createImageData(cv.width, cv.height), px = im.data;
-  for (let yy = 0; yy < cv.height; yy += 2) for (let xx = 0; xx < cv.width; xx += 2) { const wx = xx / s + cx0 - vw / 2, wy = (cv.height - yy) / s + cy0 - vh / 2, i = exCell(wx, wy); let col = [11, 16, 26];
-    if (i >= 0 && EX.seen[i]) { const p = 1 / (1 + Math.exp(-EX.lo[i])); col = p > 0.67 ? [230, 235, 245] : p < 0.33 ? [29, 42, 68] : [55, 62, 80]; }
-    for (let j = 0; j < 2; j++) for (let k = 0; k < 2; k++) { const o = ((yy + j) * cv.width + xx + k) * 4; if (o < px.length) { px[o] = col[0]; px[o + 1] = col[1]; px[o + 2] = col[2]; px[o + 3] = 255; } } }
-  c.putImageData(im, 0, 0);
+  const gc = exDraw.gc || (exDraw.gc = document.createElement('canvas')); if (gc.width !== NX) { gc.width = NX; gc.height = NY; }
+  if (EX.gridDirty) { const gx = gc.getContext('2d'), id = gx.createImageData(NX, NY), q = id.data;
+    for (let gy = 0; gy < NY; gy++) for (let gx2 = 0; gx2 < NX; gx2++) { const i = gy * NX + gx2, o = ((NY - 1 - gy) * NX + gx2) * 4; let col = [11, 16, 26];
+      if (EX.seen[i]) { const l = EX.lo[i]; col = l > 0.7 ? [236, 240, 248] : l < -0.7 ? [32, 48, 80] : [52, 60, 80]; }
+      q[o] = col[0]; q[o + 1] = col[1]; q[o + 2] = col[2]; q[o + 3] = 255; }
+    gx.putImageData(id, 0, 0); EX.gridDirty = false; }
+  c.fillStyle = '#0b101a'; c.fillRect(0, 0, cv.width, cv.height); c.imageSmoothingEnabled = false;
+  c.drawImage(gc, X(-EX.ox * G), Y((NY - EX.oy) * G), NX * G * s, NY * G * s);
   const line = (arr, col, w, dash) => { if (!arr || arr.length < 2) return; c.strokeStyle = col; c.lineWidth = w * d; c.setLineDash(dash ? [6 * d, 5 * d] : []); c.beginPath(); arr.forEach((p, i) => i ? c.lineTo(X(p[0]), Y(p[1])) : c.moveTo(X(p[0]), Y(p[1]))); c.stroke(); c.setLineDash([]); };
   if (EX.src === 'sim' && EX.showTruth && EX.world) { const W = EX.world, o0 = W.start; c.strokeStyle = 'rgba(255,255,255,.35)'; c.lineWidth = d; c.setLineDash([3 * d, 3 * d]);
     for (const o of W.objs) c.strokeRect(X(o.b[0] - o0[0]), Y(o.b[3] - o0[1]), (o.b[2] - o.b[0]) * s, (o.b[3] - o.b[1]) * s);
     for (const P of exPeople(W.t)) { c.beginPath(); c.arc(X(P.x - o0[0]), Y(P.y - o0[1]), P.r * s, 0, 7); c.stroke(); } c.setLineDash([]);
     const T = W.truth; c.save(); c.translate(X(T.x - o0[0]), Y(T.y - o0[1])); c.rotate(-T.psi); c.strokeStyle = '#fff'; c.lineWidth = 1.5 * d; c.beginPath(); c.moveTo(0, -10 * d); c.lineTo(-6 * d, 6 * d); c.lineTo(6 * d, 6 * d); c.closePath(); c.stroke(); c.restore(); }
-  line(EX.walked, '#4f8cff', 2.2); if (EX.route) line(EX.route, '#ffd23f', 2, true);
+  line([...EX.walked, [dp.x, dp.y]], '#4f8cff', 2.2); if (EX.route) line(EX.route, '#ffd23f', 2, true);
   if (EX.scan) { c.fillStyle = 'rgba(255,90,95,.8)'; for (let k = 0; k < EX.scan.cols.length; k += 3) { const q = EX.scan.cols[k]; if (!q.hit) continue; const [dx, dy] = fwdV(EX.pose.psi - q.a); c.fillRect(X(EX.pose.x + dx * q.r) - 1.5 * d, Y(EX.pose.y + dy * q.r) - 1.5 * d, 3 * d, 3 * d); } }
   for (const T of EX.tracks) if (T.moving) { c.strokeStyle = '#ff9f1a'; c.fillStyle = 'rgba(255,159,26,.35)'; c.lineWidth = 2 * d; c.beginPath(); c.arc(X(T.x), Y(T.y), 0.28 * s, 0, 7); c.fill(); c.stroke();
     c.setLineDash([4 * d, 3 * d]); c.beginPath(); c.moveTo(X(T.x), Y(T.y)); c.lineTo(X(T.x + 2 * T.vx), Y(T.y + 2 * T.vy)); c.stroke(); c.setLineDash([]); }
   c.strokeStyle = '#ff5a5f'; c.lineWidth = 2.5 * d; for (const [x, y] of EX.collisions) { c.beginPath(); c.moveTo(X(x) - 6 * d, Y(y) - 6 * d); c.lineTo(X(x) + 6 * d, Y(y) + 6 * d); c.moveTo(X(x) + 6 * d, Y(y) - 6 * d); c.lineTo(X(x) - 6 * d, Y(y) + 6 * d); c.stroke(); }
   if (EX.goal) { c.fillStyle = '#ffd23f'; c.beginPath(); c.arc(X(EX.goal[0]), Y(EX.goal[1]), 7 * d, 0, 7); c.fill(); c.font = (10 * d) + 'px system-ui'; c.fillText('GOAL', X(EX.goal[0]) + 9 * d, Y(EX.goal[1]) + 4 * d); }
-  c.save(); c.translate(X(EX.pose.x), Y(EX.pose.y)); c.rotate(-EX.pose.psi); c.fillStyle = '#4f8cff'; c.beginPath(); c.moveTo(0, -11 * d); c.lineTo(-7 * d, 7 * d); c.lineTo(7 * d, 7 * d); c.closePath(); c.fill(); c.restore();
+  c.save(); c.translate(X(dp.x), Y(dp.y)); c.rotate(-dp.psi); c.fillStyle = '#4f8cff'; c.beginPath(); c.moveTo(0, -11 * d); c.lineTo(-7 * d, 7 * d); c.lineTo(7 * d, 7 * d); c.closePath(); c.fill(); c.restore();
   // camera view with floor mask and obstacle base
   const cc = $('exCam'), dd = sizeCanvas(cc), k2 = cc.getContext('2d');
   if (EX.frame) { const { AW, AH } = EX, oc = exDraw.oc || (exDraw.oc = document.createElement('canvas')); oc.width = AW; oc.height = AH; const ox = oc.getContext('2d'), id = ox.createImageData(AW, AH);
@@ -3056,7 +3075,7 @@ $('exStart').onclick = async () => {
 };
 $('exStop').onclick = () => { EX.on = false; };
 $('exLearn').onclick = () => { if (EX.src === 'live') EX.wantLearn = true; else if (EX.frame) exLearnFloor(EX.frame); $('exMsg').textContent = 'Floor colour learned from the bottom of the image.'; };
-$('exClear').onclick = () => { if (EX.lo) { EX.lo.fill(0); EX.seen.fill(0); EX.tracks = []; } };
+$('exClear').onclick = () => { if (EX.lo) { EX.lo.fill(0); EX.seen.fill(0); EX.tracks = []; EX.gridDirty = true; } };
 $('exTruth').onclick = () => { EX.showTruth = !EX.showTruth; $('exTruth').classList.toggle('on', EX.showTruth); };
 $('exTruth').classList.toggle('on', EX.showTruth);
 $('exCam').onclick = e => { if (!EX.frame || !EX.lo) { $('exMsg').textContent = 'Tap Start first, then tap the floor in the camera view.'; return; }
@@ -3069,7 +3088,7 @@ $('exMap').onclick = e => { if (!EX.view) return; const r = $('exMap').getBoundi
   EX.goal = [(e.clientX - r.left) * k / v.s + v.cx0 - v.vw / 2, ($('exMap').height - (e.clientY - r.top) * k) / v.s + v.cy0 - v.vh / 2]; EX.goalSrc = 'map'; EX.markerOn = false; $('exMarker').classList.remove('on'); EX.route = null; EX.lastPlan = -9; EX.arrived = false; };
 window.addEventListener('devicemotion', e => { if (EX.src !== 'live' || !EX.on) return; const a = e.accelerationIncludingGravity, r = e.rotationRate; if (!a || a.x == null || !r) return;
   const now = performance.now() / 1000, dt = EX.lastM ? Math.min(0.1, now - EX.lastM) : 0.016; EX.lastM = now; exMotion([a.x, a.y, a.z], [r.beta || 0, r.gamma || 0, r.alpha || 0], dt, (performance.now() - EX.live0) / 1000, EX.compass); });
-window.addEventListener('deviceorientationabsolute', e => { if (e.alpha != null) EX.compass = -e.alpha; });
+window.addEventListener('deviceorientationabsolute', e => { if (e.alpha != null) EX.compass = e.alpha; });   // alpha grows counter-clockwise, like our heading
 let lastX = 0;
 // ---------- main loop ----------
 function updBadge() {
