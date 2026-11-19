@@ -85,4 +85,4 @@ flowchart LR
 - `test_images/real_floor.png`: a realistic test frame for the Camera tab's *Photo* source.
 - `matlab/phone_sensor_demo.m`: the same pipeline on real phone data via MATLAB Mobile (`mobiledev`).
 
-Team: Rayon Biswas, Zaid Faruqui, Tanisha Nevrekar, Piyush Patil, Ananya Rane, Arpit Rajput.
+Team: Rayon Biswas, Zaid Faruqui, Tanisha Nevrekar, Piyush Patil, Ananya Rane, Hood Shaikh, Arpit Rajput.
