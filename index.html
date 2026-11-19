@@ -64,7 +64,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
 </head>
 <body>
 <header>
-  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-19c</small></h1>
+  <h1>Noise-Robust Path Tracking · DSP Lab<small>Classical DSP on live phone sensors: camera, accelerometer, gyroscope · build 2026-11-19d</small></h1>
   <span class="badge" id="badge">idle</span>
   <button class="btn" id="linkBtn" style="padding:5px 10px;font-size:12px">📡 Phone → Laptop</button>
 </header>
@@ -2790,27 +2790,30 @@ function exLearnFloor(img) {                           // bottom 20% of the imag
 }
 const exIsFloor = (f, F) => ((f[0] - F.m[0]) / F.s[0]) ** 2 + ((f[1] - F.m[1]) / F.s[1]) ** 2 + ((f[2] - F.m[2]) / F.s[2]) ** 2 < 9;
 function exScan(img, dep0, h, vfov, mk) {
-  const { AW, AH } = EX, F = EX.floor, fy = (AH / 2) / Math.tan(vfov / 2), fx = fy, Rmax = 3.5;
+  const { AW, AH } = EX, F = EX.floor, fy = (AH / 2) / Math.tan(vfov / 2), fx = fy, Rmax = 3.5, Rfree = 2.5;
   const yh = Math.max(0, Math.ceil(AH / 2 - 0.5 - fy * Math.tan(dep0)));     // first row below the horizon
-  const raw = [], mask = new Uint8Array(AW * AH);
-  for (let x = 0; x < AW; x++) { let run = 0, yo = -1;
-    for (let y = AH - 1; y >= yh; y--) { const fl = (mk && mk[y * AW + x]) || exIsFloor(exFeat(img, (y * AW + x) * 3), F); mask[y * AW + x] = fl ? 1 : 0; if (!fl) { if (++run >= 3) { yo = y + 2; break; } } else run = 0; }
+  const raw = [], mask = new Uint8Array(AW * AH), rows = Math.max(0, AH - yh);
+  for (let x = 0; x < AW; x++) { let run = 0, yo = -1, nf = 0, ns = 0;
+    for (let y = AH - 1; y >= yh; y--) { const fl = (mk && mk[y * AW + x]) || exIsFloor(exFeat(img, (y * AW + x) * 3), F); mask[y * AW + x] = fl ? 1 : 0; ns++; if (fl) nf++; if (!fl) { if (++run >= 3) { yo = y + 2; break; } } else run = 0; }
     const a = Math.atan((x - AW / 2 + 0.5) / fx);
-    if (yo >= 0) { const dep = dep0 + Math.atan((yo - AH / 2 + 0.5) / fy), r = dep > 0.01 ? h / Math.tan(dep) / Math.cos(a) : Rmax; raw.push({ a, r: Math.min(r, Rmax), hit: r < Rmax, y: yo }); }
-    else raw.push({ a, r: Math.min(Rmax, dep0 + Math.atan((yh - AH / 2 + 0.5) / fy) > 0.01 ? h / Math.tan(dep0 + Math.atan((yh - AH / 2 + 0.5) / fy)) : Rmax), hit: false, y: -1 }); }
+    if (yo >= 0) { const dep = dep0 + Math.atan((yo - AH / 2 + 0.5) / fy), r = dep > 0.01 ? h / Math.tan(dep) / Math.cos(a) : Rmax; raw.push({ a, r: Math.min(r, Rmax), hit: r < Rmax, y: yo, ok: true }); }
+    else { const dep = dep0 + Math.atan((yh - AH / 2 + 0.5) / fy), r = dep > 0.01 ? h / Math.tan(dep) / Math.cos(a) : Rmax;
+      // no obstacle in this column: free only as far as floor was really seen, capped at 2.5 m, and only if most of the column was floor
+      raw.push({ a, r: Math.min(r, Rfree), hit: false, y: -1, ok: rows >= 6 && nf >= 0.6 * ns }); } }
   const out = raw.map((c, x) => { const win = raw.slice(Math.max(0, x - 2), Math.min(AW, x + 3)), rs = win.map(w => w.r).sort((p, q) => p - q), hits = win.filter(w => w.hit).length;   // 5-column median
-    return { a: c.a, r: rs[rs.length >> 1], hit: hits * 2 > win.length, y: c.y }; });
+    return { a: c.a, r: rs[rs.length >> 1], hit: hits * 2 > win.length, y: c.y, ok: c.ok }; });
   // keep the floor model up to date (slow running mean over the bottom rows that are floor)
   let n = 0, m = [0, 0, 0]; for (let y = AH - 4; y < AH; y++) for (let x = 0; x < AW; x += 2) if (mask[y * AW + x]) { const f = exFeat(img, (y * AW + x) * 3); for (let k = 0; k < 3; k++) m[k] += f[k]; n++; }
   if (n > 20) for (let k = 0; k < 3; k++) F.m[k] = 0.98 * F.m[k] + 0.02 * m[k] / n;
-  return { cols: out, mask, yh };
+  return { cols: out, mask, yh, rows };
 }
 // ---------- occupancy grid ----------
 const exCell = (x, y) => { const gx = Math.floor(x / EX.G) + EX.ox, gy = Math.floor(y / EX.G) + EX.oy; return gx >= 0 && gy >= 0 && gx < EX.NX && gy < EX.NY ? gy * EX.NX + gx : -1; };
 function exIntegrate(scan, pose, skip) {
   const { NX, NY, G } = EX, x0 = Math.floor(pose.x / G) + EX.ox, y0 = Math.floor(pose.y / G) + EX.oy;
   const mark = (x, y, dl, lo, hi) => { if (x >= 0 && y >= 0 && x < NX && y < NY) { const i = y * NX + x; EX.lo[i] = Math.max(lo, Math.min(hi, EX.lo[i] + dl)); EX.seen[i] = 1; } };
-  for (let k = 0; k < scan.cols.length; k++) { const c = scan.cols[k], [dx, dy] = fwdV(pose.psi - c.a), hc = exCell(pose.x + dx * c.r, pose.y + dy * c.r);
+  for (let k = 0; k < scan.cols.length; k++) { const c = scan.cols[k]; if (!c.ok && !c.hit) continue;   // no floor seen in this column: leave it unknown
+    const [dx, dy] = fwdV(pose.psi - c.a), hc = exCell(pose.x + dx * c.r, pose.y + dy * c.r);
     const sk = skip[k] && !(hc >= 0 && EX.lo[hc] > 1.5);   // a cell already seen as obstacle several times is never erased by the moving-object logic
     // free space: along the ray up to 15 cm short of an obstacle, so neighbouring rays do not erase its edge (-0.4 each, floor -2 so a new obstacle shows in ~3 frames)
     const rf = c.hit ? Math.max(0, c.r - (sk ? 0.3 : 0.15)) : c.r, x1 = Math.floor((pose.x + dx * rf) / G) + EX.ox, y1 = Math.floor((pose.y + dy * rf) / G) + EX.oy;
@@ -2889,7 +2892,15 @@ function exDirections() {
 }
 // ---------- motion sensors: steps, heading, bump (same code for the simulated and the real phone) ----------
 function exMotion(aig, rate, dt, t, compassDeg) {     // aig: accel incl. gravity (m/s^2, device axes); rate: [beta, gamma, alpha] deg/s
-  const D = EX.pdr, am = Math.hypot(aig[0], aig[1], aig[2]);
+  const D = EX.pdr;
+  // gravity sign: some phones report it reversed. During the first second the camera is pointed down at the floor (we ask for
+  // that), so the up vector must lean toward the screen (+z); if it leans the other way, flip the accelerometer for the whole run
+  if (t < 1.0) { const n0 = Math.max(1e-3, Math.hypot(...aig)); D.gs = (D.gs || [0, 0, 0]).map((v, i) => v + aig[i] / n0); }
+  else if (D.aSign == null) { const g0 = D.gs || [0, 0, 1], gn = Math.max(1e-3, Math.hypot(...g0)); D.aSign = g0[2] / gn < -0.1 ? -1 : 1;
+    EX.up = g0.map(v => D.aSign * v / gn);   // start the orientation filter from the averaged, sign-corrected gravity of the still second
+    D.pitchAtStart = Math.asin(Math.max(-1, Math.min(1, EX.up[2]))) * R2D; }
+  if (D.aSign === -1) aig = aig.map(v => -v);
+  const am = Math.hypot(aig[0], aig[1], aig[2]);
   // orientation: the "up" vector is carried along by the gyro (du/dt = -w x u) and pulled gently toward measured gravity,
   // mostly when |a| is close to g (footstep jolts barely move it): a complementary filter on a vector -> steady camera pitch
   const w = rate.map(v => v * D2R), u = EX.up;
@@ -2946,15 +2957,15 @@ function exStep(dt) {
     if (!vid.videoWidth) return; const vw = vid.videoWidth, vh = vid.videoHeight; EX.AH = Math.round(EX.AW * vh / vw);
     const c = exStep.cv || (exStep.cv = document.createElement('canvas')); c.width = EX.AW; c.height = EX.AH; const cx = c.getContext('2d', { willReadFrequently: true }); cx.drawImage(vid, 0, 0, EX.AW, EX.AH);
     const D = cx.getImageData(0, 0, EX.AW, EX.AH).data; img = new Float32Array(EX.AW * EX.AH * 3); for (let i = 0, j = 0; i < D.length; i += 4, j += 3) { img[j] = D[i] / 255; img[j + 1] = D[i + 1] / 255; img[j + 2] = D[i + 2] / 255; }
-    dep0 = Math.asin(Math.max(-1, Math.min(1, EX.up[2] * (EX.upSign || 1))));
-    if (EX.t > 2 && dep0 < -0.15 && !EX.upSign) EX.upSign = -1;              // some phones report gravity with the opposite sign
+    dep0 = Math.asin(Math.max(-1, Math.min(1, EX.up[2])));
     if (EX.wantLearn) { exLearnFloor(img); EX.wantLearn = false; }
   }
   EX.frame = img; if (EX.bump) EX.bump = Math.max(0, EX.bump - dt);
-  if (!EX.floor || EX.t < 1.0) { EX.dirs = { stop: true, turn: 0, text: 'Hold still…', sub: EX.floor ? 'measuring gyro bias' : 'point the camera at clear floor, then Learn floor', key: 'hold' }; return; }
+  if (!EX.floor || EX.t < 1.0 || (EX.src === 'live' && EX.pdr.aSign == null)) { EX.dirs = { stop: true, turn: 0, text: 'Hold still…', sub: 'camera tilted down at clear floor (about 20–40°): learning the floor and the gyro', key: 'hold' }; return; }
   EX.dep0 = dep0; const mkr = exFindMarker(img, dep0, h, vfov); EX.mk = mkr;
   if (mkr && EX.markerOn && EX.goalSrc === 'marker' && EX.goal && Math.hypot(mkr.goal[0] - EX.goal[0], mkr.goal[1] - EX.goal[1]) > 1.5) EX.mk = null;   // a jump: not the marker we are walking to
   if (EX.mk && EX.markerOn) { EX.goal = EX.goal && EX.goalSrc === 'marker' ? [0.8 * EX.goal[0] + 0.2 * mkr.goal[0], 0.8 * EX.goal[1] + 0.2 * mkr.goal[1]] : mkr.goal; EX.goalSrc = 'marker'; EX.arrived = false; }
+  if (dep0 < 8 * D2R) { EX.scan = null; EX.dirs = { stop: true, turn: 0, text: 'Tilt the camera down', sub: 'it must see the floor ahead: now ' + (dep0 * R2D).toFixed(0) + '° below the horizon, needs 15–45°', key: 'tilt', hold: true }; return; }
   const scan = exScan(img, dep0, h, vfov, EX.markerOn && EX.mk ? EX.mk.mask : null); EX.scan = scan;   // marker pixels count as floor only in marker mode
   const skip = exTrack(scan, EX.pose, dt); exIntegrate(scan, EX.pose, skip);
   // time to collision from the forward ±12° range (low-passed range and range rate)
@@ -3087,7 +3098,8 @@ $('exMarker').onclick = () => { EX.markerOn = !EX.markerOn; $('exMarker').classL
 $('exMap').onclick = e => { if (!EX.view) return; const r = $('exMap').getBoundingClientRect(), v = EX.view, k = $('exMap').width / r.width;
   EX.goal = [(e.clientX - r.left) * k / v.s + v.cx0 - v.vw / 2, ($('exMap').height - (e.clientY - r.top) * k) / v.s + v.cy0 - v.vh / 2]; EX.goalSrc = 'map'; EX.markerOn = false; $('exMarker').classList.remove('on'); EX.route = null; EX.lastPlan = -9; EX.arrived = false; };
 window.addEventListener('devicemotion', e => { if (EX.src !== 'live' || !EX.on) return; const a = e.accelerationIncludingGravity, r = e.rotationRate; if (!a || a.x == null || !r) return;
-  const now = performance.now() / 1000, dt = EX.lastM ? Math.min(0.1, now - EX.lastM) : 0.016; EX.lastM = now; exMotion([a.x, a.y, a.z], [r.beta || 0, r.gamma || 0, r.alpha || 0], dt, (performance.now() - EX.live0) / 1000, EX.compass); });
+// relayed to the laptop (e.linkDt): use the phone's own sample spacing, not the bursty arrival times
+  const now = performance.now() / 1000, dt = e.linkDt > 0 ? Math.min(0.1, e.linkDt) : EX.lastM ? Math.min(0.1, now - EX.lastM) : 0.016; EX.lastM = now; exMotion([a.x, a.y, a.z], [r.beta || 0, r.gamma || 0, r.alpha || 0], dt, (performance.now() - EX.live0) / 1000, EX.compass); });
 window.addEventListener('deviceorientationabsolute', e => { if (e.alpha != null) EX.compass = e.alpha; });   // alpha grows counter-clockwise, like our heading
 let lastX = 0;
 // ---------- main loop ----------
